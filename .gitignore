@@ -1,0 +1,51 @@
+# ============================================================
+# 1. LOCAL PERSISTENCE & DATABASE (Chats, Characters & Settings)
+# ============================================================
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+multichat.db*
+
+# ============================================================
+# 2. USER UPLOADED MEDIA (Character Pictures & Avatars)
+# ============================================================
+/public/uploads/*
+!/public/uploads/**/.gitkeep
+!/public/uploads/**/.gitignore
+
+# ============================================================
+# 3. SECRETS, API KEYS & ENVIRONMENT VARIABLES
+# ============================================================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+*.key
+*.pem
+credentials.json
+
+# ============================================================
+# 4. DEPENDENCIES & BUILD ARTIFACTS
+# ============================================================
+/node_modules
+/.next/
+/out/
+/build/
+/dist/
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
+
+# ============================================================
+# 5. LOGS & RUNTIME DEBUGGING
+# ============================================================
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
