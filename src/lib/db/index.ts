@@ -9,6 +9,11 @@ import type {
   MessageVersion,
   RoomQueueState,
   LlmSettings,
+  SystemPromptPreset,
+  SamplerPreset,
+  UserPersona,
+  Lorebook,
+  LorebookEntry,
 } from './schema';
 
 const DB_PATH = path.join(process.cwd(), 'multichat.db');
@@ -17,17 +22,304 @@ declare global {
   // eslint-disable-next-line no-var
   var __sqliteDb: DatabaseSync | undefined;
   // eslint-disable-next-line no-var
-  var __avatarMigrated: boolean | undefined;
+  var __tavernMigratedV3: boolean | undefined;
 }
 
-function ensureAvatarUrlColumn(db: DatabaseSync) {
-  if (global.__avatarMigrated) return;
-  const cols = db.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
-  const hasAvatarUrl = cols.some((c) => c.name === 'avatar_url');
-  if (!hasAvatarUrl && cols.length > 0) {
-    db.exec('ALTER TABLE characters ADD COLUMN avatar_url TEXT;');
+function ensureColumn(db: DatabaseSync, table: string, colName: string, colDef: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (cols.length > 0 && !cols.some((c) => c.name === colName)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${colName} ${colDef};`);
   }
-  global.__avatarMigrated = true;
+}
+
+function stripUndefined<T extends object>(obj: T): Partial<T> {
+  const cleaned: Partial<T> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) {
+      (cleaned as Record<string, unknown>)[k] = v;
+    }
+  }
+  return cleaned;
+}
+
+function runTavernMigrationsAndSeed(db: DatabaseSync) {
+  if (global.__tavernMigratedV3) return;
+
+  // Migrate existing tables non-destructively
+  ensureColumn(db, 'characters', 'avatar_url', 'TEXT');
+  ensureColumn(db, 'characters', 'override_model_tuning', 'INTEGER NOT NULL DEFAULT 0');
+
+  ensureColumn(db, 'rooms', 'memory_box', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'rooms', 'summary_model_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'rooms', 'auto_summarize_interval', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'rooms', 'active_lorebook_ids_json', "TEXT NOT NULL DEFAULT '[\"lb_baker_street_01\"]'");
+
+  ensureColumn(db, 'llm_settings', 'temperature', 'REAL NOT NULL DEFAULT 0.75');
+  ensureColumn(db, 'llm_settings', 'max_tokens', 'INTEGER NOT NULL DEFAULT 300');
+  ensureColumn(db, 'llm_settings', 'top_p', 'REAL NOT NULL DEFAULT 0.92');
+  ensureColumn(db, 'llm_settings', 'top_k', 'INTEGER NOT NULL DEFAULT 100');
+  ensureColumn(db, 'llm_settings', 'min_p', 'REAL NOT NULL DEFAULT 0.05');
+  ensureColumn(db, 'llm_settings', 'repetition_penalty', 'REAL NOT NULL DEFAULT 1.05');
+  ensureColumn(db, 'llm_settings', 'frequency_penalty', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn(db, 'llm_settings', 'presence_penalty', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn(db, 'llm_settings', 'active_system_prompt_id', "TEXT NOT NULL DEFAULT 'sp_roleplay'");
+  ensureColumn(db, 'llm_settings', 'personas_enabled', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(db, 'llm_settings', 'active_persona_id', "TEXT NOT NULL DEFAULT 'persona_inspector_01'");
+  ensureColumn(db, 'llm_settings', 'active_preset_id', 'TEXT');
+  ensureColumn(db, 'llm_settings', 'favorite_models_json', "TEXT NOT NULL DEFAULT '[]'");
+
+  // Ensure Tavern tables match v2 schema (drop & recreate if legacy draft columns detected)
+  const checkTableHasCol = (table: string, col: string) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return cols.length === 0 || cols.some((c) => c.name === col);
+  };
+
+  if (!checkTableHasCol('sampler_presets', 'title')) {
+    db.exec('DROP TABLE IF EXISTS sampler_presets;');
+  }
+  if (!checkTableHasCol('user_personas', 'name')) {
+    db.exec('DROP TABLE IF EXISTS user_personas;');
+  }
+  if (!checkTableHasCol('lorebooks', 'title') || !checkTableHasCol('lorebook_entries', 'lorebook_id')) {
+    db.exec('DROP TABLE IF EXISTS lorebook_entries;');
+    db.exec('DROP TABLE IF EXISTS lorebooks;');
+  }
+
+  // Create Tavern tables if not exist
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS system_prompts (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      is_builtin INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sampler_presets (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      temperature REAL NOT NULL DEFAULT 0.75,
+      max_tokens INTEGER NOT NULL DEFAULT 300,
+      top_p REAL NOT NULL DEFAULT 0.92,
+      top_k INTEGER NOT NULL DEFAULT 100,
+      min_p REAL NOT NULL DEFAULT 0.05,
+      repetition_penalty REAL NOT NULL DEFAULT 1.05,
+      frequency_penalty REAL NOT NULL DEFAULT 0,
+      presence_penalty REAL NOT NULL DEFAULT 0,
+      system_prompt_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_personas (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      avatar_url TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS lorebooks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS lorebook_entries (
+      id TEXT PRIMARY KEY,
+      lorebook_id TEXT NOT NULL REFERENCES lorebooks(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      keywords TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL,
+      is_constant INTEGER NOT NULL DEFAULT 0,
+      is_enabled INTEGER NOT NULL DEFAULT 1,
+      insertion_position TEXT NOT NULL DEFAULT 'after_scenario',
+      created_at INTEGER NOT NULL
+    );
+  `);
+
+  const now = Date.now();
+
+  // Seed Moescape-style System Prompts
+  const spCount = (db.prepare('SELECT COUNT(*) as cnt FROM system_prompts').get() as { cnt: number }).cnt;
+  if (spCount === 0) {
+    const insertSp = db.prepare(`
+      INSERT INTO system_prompts (id, title, content, is_builtin, created_at)
+      VALUES (?, ?, ?, 1, ?)
+    `);
+    insertSp.run(
+      'sp_roleplay',
+      'Roleplay',
+      "Write {{char}}'s next response in a fictional role-play between {{char}} and {{user}}.",
+      now
+    );
+    insertSp.run(
+      'sp_spicy',
+      'Spicy Roleplay',
+      "Write {{char}}'s next response. Any act of role play scenarios will be described in vivid, unfiltered details.",
+      now + 1
+    );
+    insertSp.run(
+      'sp_default',
+      'Default',
+      "Write {{char}}'s next response.",
+      now + 2
+    );
+    insertSp.run(
+      'sp_long',
+      'Long responses',
+      'You are an immersive, creative roleplay partner with a talent for rich storytelling and deep character work. You ALWAYS write long, detailed, cinematic responses — no exceptions, no matter how small the action or dialogue. ## Length Requirements (Non-Negotiable) - Every single response must be **at minimum 3–5 paragraphs**. - Action scenes: describe every beat, movement, and consequence in full. - Dialogue scenes: include tone, expression, pauses, and the environment around the conversation. - Quiet or transitional moments: use them for world-building, atmosphere, and character reflection. - **Never summarize when you can show.** Never cut a scene short. Always write it out.',
+      now + 3
+    );
+    insertSp.run(
+      'sp_sol',
+      'Sol (Narrator)',
+      'You will narrate in third-person. You will focus narrating on whoever {{user}} is currently interacting with. {{char}} provides detailed descriptive prose and vivid results.',
+      now + 4
+    );
+  }
+
+  // Seed Sampler Presets
+  const presetCount = (db.prepare('SELECT COUNT(*) as cnt FROM sampler_presets').get() as { cnt: number }).cnt;
+  if (presetCount === 0) {
+    const insertPreset = db.prepare(`
+      INSERT INTO sampler_presets (
+        id, title, description, temperature, max_tokens, top_p, top_k, min_p,
+        repetition_penalty, frequency_penalty, presence_penalty, system_prompt_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertPreset.run(
+      'preset_balanced',
+      'Balanced Roleplay',
+      'Grounded, natural character dialogue with balanced creativity (Temp 0.75, Top-P 0.92)',
+      0.75,
+      350,
+      0.92,
+      100,
+      0.05,
+      1.05,
+      0,
+      0,
+      'sp_roleplay',
+      now
+    );
+    insertPreset.run(
+      'preset_creative',
+      'Creative & Unfiltered',
+      'Higher temperature and expressive prose for dramatic turns (Temp 0.95, Top-P 0.96)',
+      0.95,
+      500,
+      0.96,
+      100,
+      0.03,
+      1.08,
+      0.1,
+      0.1,
+      'sp_spicy',
+      now + 1
+    );
+    insertPreset.run(
+      'preset_cinematic',
+      'Cinematic Long-Form',
+      'Configured for multi-paragraph novelistic storytelling (600 response tokens)',
+      0.8,
+      650,
+      0.94,
+      100,
+      0.05,
+      1.05,
+      0,
+      0,
+      'sp_long',
+      now + 2
+    );
+  }
+
+  // Seed User Personas
+  const personaCount = (db.prepare('SELECT COUNT(*) as cnt FROM user_personas').get() as { cnt: number }).cnt;
+  if (personaCount === 0) {
+    const insertPersona = db.prepare(`
+      INSERT INTO user_personas (id, title, name, description, avatar_url, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    insertPersona.run(
+      'persona_inspector_01',
+      'Scotland Yard Inspector',
+      'Inspector',
+      '{{user}} is a sharp-eyed detective inspector who brought the encrypted Whitehall cylinder to 221B Baker Street. Calm under pressure, observant, and trusted by both Sherlock and Watson.',
+      null,
+      now
+    );
+    insertPersona.run(
+      'persona_director_02',
+      'Mysterious Client',
+      'Alex',
+      '{{user}} is an enigmatic private client with insider knowledge of diplomatic ciphers and high-society secrets.',
+      null,
+      now + 1
+    );
+  }
+
+  // Seed Lorebooks & Entries
+  const lbCount = (db.prepare('SELECT COUNT(*) as cnt FROM lorebooks').get() as { cnt: number }).cnt;
+  if (lbCount === 0) {
+    const lbId = 'lb_baker_street_01';
+    db.prepare(`
+      INSERT INTO lorebooks (id, title, description, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      lbId,
+      'Victorian London & Whitehall Archives',
+      'World lore for 221B Baker Street, Admiralty ciphers, and key London factions.',
+      now
+    );
+
+    const insertEntry = db.prepare(`
+      INSERT INTO lorebook_entries (
+        id, lorebook_id, title, keywords, content, is_constant, is_enabled, insertion_position, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 1, 'after_scenario', ?)
+    `);
+
+    insertEntry.run(
+      ulid(),
+      lbId,
+      'Whitehall Pneumatic Dispatch Network',
+      'whitehall, pneumatic, tube, cylinder, dispatch',
+      'The Whitehall Pneumatic Dispatch is a classified underground compressed-air tube network linking the Admiralty, Foreign Office, and Charing Cross telegraph station. Only three senior ministers and the First Sea Lord hold brass seal keys.',
+      0,
+      now
+    );
+
+    insertEntry.run(
+      ulid(),
+      lbId,
+      'The Order of the White Camellia',
+      'camellia, flower, conservatory, kew',
+      'A fresh white camellia tucked beside an encrypted message is the calling card of the Langham Cabal—a ring of rogue continental intelligence brokers who trade stolen naval blueprints.',
+      0,
+      now + 1
+    );
+
+    insertEntry.run(
+      ulid(),
+      lbId,
+      'Devonport Naval Cipher Protocol',
+      'cipher, code, admiralty, devonport, parchment',
+      'Admiralty ciphers written on Cornwall iron-gall parchment use a polyalphabetic keyword shifted by the date of the full moon. Attempting to burn the parchment reveals hidden silver-nitrate numerals along the margin.',
+      0,
+      now + 2
+    );
+
+    db.prepare(`
+      UPDATE rooms
+      SET active_lorebook_ids_json = '["lb_baker_street_01"]'
+      WHERE id = 'room_baker_street_01' AND (active_lorebook_ids_json IS NULL OR active_lorebook_ids_json = '[]')
+    `).run();
+  }
+
+  global.__tavernMigratedV3 = true;
 }
 
 function getRawDb(): DatabaseSync {
@@ -39,7 +331,7 @@ function getRawDb(): DatabaseSync {
     initSchemaAndSeed(db);
     global.__sqliteDb = db;
   }
-  ensureAvatarUrlColumn(global.__sqliteDb);
+  runTavernMigrationsAndSeed(global.__sqliteDb);
   return global.__sqliteDb;
 }
 
@@ -53,6 +345,7 @@ function initSchemaAndSeed(db: DatabaseSync) {
       avatar_url TEXT,
       system_prompt TEXT NOT NULL,
       speaking_style TEXT NOT NULL DEFAULT '',
+      override_model_tuning INTEGER NOT NULL DEFAULT 0,
       model_id TEXT NOT NULL DEFAULT 'gpt-4o-mini',
       temperature REAL NOT NULL DEFAULT 0.75,
       max_tokens INTEGER NOT NULL DEFAULT 500,
@@ -68,6 +361,10 @@ function initSchemaAndSeed(db: DatabaseSync) {
       cooldown_ms INTEGER NOT NULL DEFAULT 3000,
       max_auto_turns INTEGER NOT NULL DEFAULT 8,
       context_window_limit INTEGER NOT NULL DEFAULT 30,
+      memory_box TEXT NOT NULL DEFAULT '',
+      summary_model_id TEXT NOT NULL DEFAULT '',
+      auto_summarize_interval INTEGER NOT NULL DEFAULT 0,
+      active_lorebook_ids_json TEXT NOT NULL DEFAULT '["lb_baker_street_01"]',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -130,11 +427,24 @@ function initSchemaAndSeed(db: DatabaseSync) {
       api_key TEXT NOT NULL DEFAULT '',
       default_model TEXT NOT NULL DEFAULT 'gpt-4o-mini',
       use_mock_fallback INTEGER NOT NULL DEFAULT 1,
+      temperature REAL NOT NULL DEFAULT 0.75,
+      max_tokens INTEGER NOT NULL DEFAULT 300,
+      top_p REAL NOT NULL DEFAULT 0.92,
+      top_k INTEGER NOT NULL DEFAULT 100,
+      min_p REAL NOT NULL DEFAULT 0.05,
+      repetition_penalty REAL NOT NULL DEFAULT 1.05,
+      frequency_penalty REAL NOT NULL DEFAULT 0,
+      presence_penalty REAL NOT NULL DEFAULT 0,
+      active_system_prompt_id TEXT NOT NULL DEFAULT 'sp_roleplay',
+      personas_enabled INTEGER NOT NULL DEFAULT 1,
+      active_persona_id TEXT NOT NULL DEFAULT 'persona_inspector_01',
+      active_preset_id TEXT,
+      favorite_models_json TEXT NOT NULL DEFAULT '[]',
       updated_at INTEGER NOT NULL
     );
   `);
 
-  ensureAvatarUrlColumn(db);
+  runTavernMigrationsAndSeed(db);
 
   const countRow = db.prepare('SELECT COUNT(*) as cnt FROM characters').get() as { cnt: number };
   if (countRow.cnt === 0) {
@@ -145,8 +455,8 @@ function initSchemaAndSeed(db: DatabaseSync) {
     const charKaelen = 'char_kaelen_04';
 
     const insertChar = db.prepare(`
-      INSERT INTO characters (id, name, role_title, avatar_color, avatar_url, system_prompt, speaking_style, model_id, temperature, max_tokens, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO characters (id, name, role_title, avatar_color, avatar_url, system_prompt, speaking_style, override_model_tuning, model_id, temperature, max_tokens, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
     `);
 
     insertChar.run(
@@ -207,8 +517,11 @@ function initSchemaAndSeed(db: DatabaseSync) {
 
     const room1 = 'room_baker_street_01';
     db.prepare(`
-      INSERT INTO rooms (id, title, scenario_prompt, user_display_name, turn_strategy, cooldown_ms, max_auto_turns, context_window_limit, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO rooms (
+        id, title, scenario_prompt, user_display_name, turn_strategy, cooldown_ms, max_auto_turns,
+        context_window_limit, memory_box, active_lorebook_ids_json, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       room1,
       '221B Baker Street: The Midnight Cipher',
@@ -218,6 +531,8 @@ function initSchemaAndSeed(db: DatabaseSync) {
       3000,
       8,
       30,
+      'The brass cylinder arrived at 1:15 AM via the Whitehall pneumatic dispatch tube. Half of the Admiralty cipher is intentionally scorched, and a fresh white camellia was tucked inside.',
+      '["lb_baker_street_01"]',
       now,
       now
     );
@@ -253,7 +568,6 @@ function initSchemaAndSeed(db: DatabaseSync) {
       VALUES (?, 'IDLE', NULL, ?, 0, '[]', ?)
     `).run(room1, charSherlock, now);
 
-    // Seed initial messages + version history
     const msg1Id = ulid();
     const msg2Id = ulid();
     const insertMsg = db.prepare(`
@@ -290,7 +604,7 @@ function initSchemaAndSeed(db: DatabaseSync) {
   }
 }
 
-// Row mappers (snake_case SQLite -> camelCase TypeScript)
+// Row mappers
 function mapCharacter(row: Record<string, unknown>): Character {
   return {
     id: String(row.id),
@@ -300,6 +614,7 @@ function mapCharacter(row: Record<string, unknown>): Character {
     avatarUrl: row.avatar_url ? String(row.avatar_url) : null,
     systemPrompt: String(row.system_prompt),
     speakingStyle: String(row.speaking_style ?? ''),
+    overrideModelTuning: Boolean(row.override_model_tuning),
     modelId: String(row.model_id ?? 'gpt-4o-mini'),
     temperature: Number(row.temperature ?? 0.75),
     maxTokens: Number(row.max_tokens ?? 500),
@@ -317,6 +632,10 @@ function mapRoom(row: Record<string, unknown>): Room {
     cooldownMs: Number(row.cooldown_ms ?? 3000),
     maxAutoTurns: Number(row.max_auto_turns ?? 8),
     contextWindowLimit: Number(row.context_window_limit ?? 30),
+    memoryBox: String(row.memory_box ?? ''),
+    summaryModelId: String(row.summary_model_id ?? ''),
+    autoSummarizeInterval: Number(row.auto_summarize_interval ?? 0),
+    activeLorebookIdsJson: String(row.active_lorebook_ids_json ?? '["lb_baker_street_01"]'),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
@@ -365,13 +684,16 @@ export function getCharacter(id: string): Character | null {
   return row ? mapCharacter(row) : null;
 }
 
-export function createCharacter(input: Omit<Character, 'id' | 'createdAt'>): Character {
+export function createCharacter(input: Omit<Character, 'id' | 'createdAt' | 'overrideModelTuning'> & { overrideModelTuning?: boolean }): Character {
   const db = getRawDb();
   const id = `char_${ulid().toLowerCase()}`;
   const now = Date.now();
   db.prepare(`
-    INSERT INTO characters (id, name, role_title, avatar_color, avatar_url, system_prompt, speaking_style, model_id, temperature, max_tokens, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO characters (
+      id, name, role_title, avatar_color, avatar_url, system_prompt, speaking_style,
+      override_model_tuning, model_id, temperature, max_tokens, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.name,
@@ -380,6 +702,7 @@ export function createCharacter(input: Omit<Character, 'id' | 'createdAt'>): Cha
     input.avatarUrl ?? null,
     input.systemPrompt,
     input.speakingStyle,
+    input.overrideModelTuning ? 1 : 0,
     input.modelId,
     input.temperature,
     input.maxTokens,
@@ -391,11 +714,12 @@ export function createCharacter(input: Omit<Character, 'id' | 'createdAt'>): Cha
 export function updateCharacter(id: string, input: Partial<Omit<Character, 'id' | 'createdAt'>>): Character | null {
   const existing = getCharacter(id);
   if (!existing) return null;
-  const updated = { ...existing, ...input };
+  const updated = { ...existing, ...stripUndefined(input) };
   const db = getRawDb();
   db.prepare(`
     UPDATE characters
-    SET name = ?, role_title = ?, avatar_color = ?, avatar_url = ?, system_prompt = ?, speaking_style = ?, model_id = ?, temperature = ?, max_tokens = ?
+    SET name = ?, role_title = ?, avatar_color = ?, avatar_url = ?, system_prompt = ?,
+        speaking_style = ?, override_model_tuning = ?, model_id = ?, temperature = ?, max_tokens = ?
     WHERE id = ?
   `).run(
     updated.name,
@@ -404,6 +728,7 @@ export function updateCharacter(id: string, input: Partial<Omit<Character, 'id' 
     updated.avatarUrl ?? null,
     updated.systemPrompt,
     updated.speakingStyle,
+    updated.overrideModelTuning ? 1 : 0,
     updated.modelId,
     updated.temperature,
     updated.maxTokens,
@@ -436,6 +761,7 @@ export function getRoomWithDetails(roomId: string): RoomWithDetails | null {
              c.id as c_id, c.name as c_name, c.role_title as c_role_title, c.avatar_color as c_avatar_color,
              c.avatar_url as c_avatar_url,
              c.system_prompt as c_system_prompt, c.speaking_style as c_speaking_style,
+             c.override_model_tuning as c_override_model_tuning,
              c.model_id as c_model_id, c.temperature as c_temperature, c.max_tokens as c_max_tokens, c.created_at as c_created_at
       FROM room_characters rc
       JOIN characters c ON c.id = rc.character_id
@@ -458,6 +784,7 @@ export function getRoomWithDetails(roomId: string): RoomWithDetails | null {
       avatarUrl: r.c_avatar_url ? String(r.c_avatar_url) : null,
       systemPrompt: String(r.c_system_prompt),
       speakingStyle: String(r.c_speaking_style ?? ''),
+      overrideModelTuning: Boolean(r.c_override_model_tuning),
       modelId: String(r.c_model_id ?? 'gpt-4o-mini'),
       temperature: Number(r.c_temperature ?? 0.75),
       maxTokens: Number(r.c_max_tokens ?? 500),
@@ -509,8 +836,11 @@ export function createRoom(input: {
   db.exec('BEGIN IMMEDIATE TRANSACTION');
   try {
     db.prepare(`
-      INSERT INTO rooms (id, title, scenario_prompt, user_display_name, turn_strategy, cooldown_ms, max_auto_turns, context_window_limit, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO rooms (
+        id, title, scenario_prompt, user_display_name, turn_strategy, cooldown_ms,
+        max_auto_turns, context_window_limit, memory_box, active_lorebook_ids_json, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '["lb_baker_street_01"]', ?, ?)
     `).run(
       roomId,
       input.title,
@@ -558,14 +888,16 @@ export function updateRoom(
   if (!existing) return null;
   const db = getRawDb();
   const now = Date.now();
-  const r = { ...existing.room, ...input };
+  const r = { ...existing.room, ...stripUndefined(input) };
 
   db.exec('BEGIN IMMEDIATE TRANSACTION');
   try {
     db.prepare(`
       UPDATE rooms
       SET title = ?, scenario_prompt = ?, user_display_name = ?, turn_strategy = ?,
-          cooldown_ms = ?, max_auto_turns = ?, context_window_limit = ?, updated_at = ?
+          cooldown_ms = ?, max_auto_turns = ?, context_window_limit = ?,
+          memory_box = ?, summary_model_id = ?, auto_summarize_interval = ?,
+          active_lorebook_ids_json = ?, updated_at = ?
       WHERE id = ?
     `).run(
       r.title,
@@ -575,6 +907,10 @@ export function updateRoom(
       r.cooldownMs,
       r.maxAutoTurns,
       r.contextWindowLimit,
+      r.memoryBox,
+      r.summaryModelId,
+      r.autoSummarizeInterval,
+      r.activeLorebookIdsJson,
       now,
       roomId
     );
@@ -907,7 +1243,7 @@ export function updateRoomQueueState(
   const details = getRoomWithDetails(roomId);
   if (!details) throw new Error(`Room ${roomId} not found`);
   const cur = details.queueState;
-  const next = { ...cur, ...patch, updatedAt: Date.now() };
+  const next = { ...cur, ...stripUndefined(patch), updatedAt: Date.now() };
 
   db.prepare(`
     UPDATE room_queue_states
@@ -927,7 +1263,7 @@ export function updateRoomQueueState(
   return next;
 }
 
-// ==================== LLM SETTINGS ====================
+// ==================== LLM SETTINGS & SAMPLERS ====================
 export function getLlmSettings(): LlmSettings {
   const db = getRawDb();
   const row = db.prepare("SELECT * FROM llm_settings WHERE id = 'default'").get() as Record<string, unknown>;
@@ -937,6 +1273,19 @@ export function getLlmSettings(): LlmSettings {
     apiKey: String(row.api_key || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || ''),
     defaultModel: String(row.default_model || process.env.LLM_DEFAULT_MODEL || 'gpt-4o-mini'),
     useMockFallback: Boolean(row.use_mock_fallback),
+    temperature: Number(row.temperature ?? 0.75),
+    maxTokens: Number(row.max_tokens ?? 300),
+    topP: Number(row.top_p ?? 0.92),
+    topK: Number(row.top_k ?? 100),
+    minP: Number(row.min_p ?? 0.05),
+    repetitionPenalty: Number(row.repetition_penalty ?? 1.05),
+    frequencyPenalty: Number(row.frequency_penalty ?? 0),
+    presencePenalty: Number(row.presence_penalty ?? 0),
+    activeSystemPromptId: String(row.active_system_prompt_id ?? 'sp_roleplay'),
+    personasEnabled: row.personas_enabled === undefined ? true : Boolean(row.personas_enabled),
+    activePersonaId: String(row.active_persona_id ?? 'persona_inspector_01'),
+    activePresetId: row.active_preset_id ? String(row.active_preset_id) : null,
+    favoriteModelsJson: String(row.favorite_models_json ?? '[]'),
     updatedAt: Number(row.updated_at),
   };
 }
@@ -944,11 +1293,315 @@ export function getLlmSettings(): LlmSettings {
 export function updateLlmSettings(patch: Partial<Omit<LlmSettings, 'id' | 'updatedAt'>>): LlmSettings {
   const db = getRawDb();
   const cur = getLlmSettings();
-  const next = { ...cur, ...patch, updatedAt: Date.now() };
+  const next = { ...cur, ...stripUndefined(patch), updatedAt: Date.now() };
   db.prepare(`
     UPDATE llm_settings
-    SET base_url = ?, api_key = ?, default_model = ?, use_mock_fallback = ?, updated_at = ?
+    SET base_url = ?, api_key = ?, default_model = ?, use_mock_fallback = ?,
+        temperature = ?, max_tokens = ?, top_p = ?, top_k = ?, min_p = ?,
+        repetition_penalty = ?, frequency_penalty = ?, presence_penalty = ?,
+        active_system_prompt_id = ?, personas_enabled = ?, active_persona_id = ?,
+        active_preset_id = ?, favorite_models_json = ?, updated_at = ?
     WHERE id = 'default'
-  `).run(next.baseUrl, next.apiKey, next.defaultModel, next.useMockFallback ? 1 : 0, next.updatedAt);
+  `).run(
+    next.baseUrl,
+    next.apiKey,
+    next.defaultModel,
+    next.useMockFallback ? 1 : 0,
+    next.temperature,
+    next.maxTokens,
+    next.topP,
+    next.topK,
+    next.minP,
+    next.repetitionPenalty,
+    next.frequencyPenalty,
+    next.presencePenalty,
+    next.activeSystemPromptId,
+    next.personasEnabled ? 1 : 0,
+    next.activePersonaId,
+    next.activePresetId ?? null,
+    next.favoriteModelsJson,
+    next.updatedAt
+  );
   return getLlmSettings();
+}
+
+// ==================== TAVERN SYSTEM PROMPTS ====================
+export function listSystemPrompts(): SystemPromptPreset[] {
+  const db = getRawDb();
+  const rows = db.prepare('SELECT * FROM system_prompts ORDER BY created_at ASC').all() as Record<string, unknown>[];
+  return rows.map((r) => ({
+    id: String(r.id),
+    title: String(r.title),
+    content: String(r.content),
+    isBuiltin: Boolean(r.is_builtin),
+    createdAt: Number(r.created_at),
+  }));
+}
+
+export function createSystemPrompt(input: { title: string; content: string }): SystemPromptPreset {
+  const db = getRawDb();
+  const id = `sp_${ulid().toLowerCase()}`;
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO system_prompts (id, title, content, is_builtin, created_at)
+    VALUES (?, ?, ?, 0, ?)
+  `).run(id, input.title, input.content, now);
+  return listSystemPrompts().find((sp) => sp.id === id)!;
+}
+
+export function updateSystemPrompt(id: string, input: { title?: string; content?: string }): SystemPromptPreset | null {
+  const db = getRawDb();
+  const existing = listSystemPrompts().find((sp) => sp.id === id);
+  if (!existing) return null;
+  db.prepare('UPDATE system_prompts SET title = ?, content = ? WHERE id = ?').run(
+    input.title ?? existing.title,
+    input.content ?? existing.content,
+    id
+  );
+  return listSystemPrompts().find((sp) => sp.id === id) ?? null;
+}
+
+export function deleteSystemPrompt(id: string): void {
+  const db = getRawDb();
+  db.prepare('DELETE FROM system_prompts WHERE id = ? AND is_builtin = 0').run(id);
+}
+
+// ==================== TAVERN SAMPLER PRESETS ====================
+export function listSamplerPresets(): SamplerPreset[] {
+  const db = getRawDb();
+  const rows = db.prepare('SELECT * FROM sampler_presets ORDER BY created_at ASC').all() as Record<string, unknown>[];
+  return rows.map((r) => ({
+    id: String(r.id),
+    title: String(r.title),
+    description: String(r.description ?? ''),
+    temperature: Number(r.temperature ?? 0.75),
+    maxTokens: Number(r.max_tokens ?? 300),
+    topP: Number(r.top_p ?? 0.92),
+    topK: Number(r.top_k ?? 100),
+    minP: Number(r.min_p ?? 0.05),
+    repetitionPenalty: Number(r.repetition_penalty ?? 1.05),
+    frequencyPenalty: Number(r.frequency_penalty ?? 0),
+    presencePenalty: Number(r.presence_penalty ?? 0),
+    systemPromptId: r.system_prompt_id ? String(r.system_prompt_id) : null,
+    createdAt: Number(r.created_at),
+  }));
+}
+
+export function createSamplerPreset(input: Omit<SamplerPreset, 'id' | 'createdAt'>): SamplerPreset {
+  const db = getRawDb();
+  const id = `preset_${ulid().toLowerCase()}`;
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO sampler_presets (
+      id, title, description, temperature, max_tokens, top_p, top_k, min_p,
+      repetition_penalty, frequency_penalty, presence_penalty, system_prompt_id, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.title,
+    input.description,
+    input.temperature,
+    input.maxTokens,
+    input.topP,
+    input.topK,
+    input.minP,
+    input.repetitionPenalty,
+    input.frequencyPenalty,
+    input.presencePenalty,
+    input.systemPromptId ?? null,
+    now
+  );
+  return listSamplerPresets().find((p) => p.id === id)!;
+}
+
+export function deleteSamplerPreset(id: string): void {
+  const db = getRawDb();
+  db.prepare('DELETE FROM sampler_presets WHERE id = ?').run(id);
+}
+
+// ==================== TAVERN USER PERSONAS ====================
+export function listUserPersonas(): UserPersona[] {
+  const db = getRawDb();
+  const rows = db.prepare('SELECT * FROM user_personas ORDER BY created_at ASC').all() as Record<string, unknown>[];
+  return rows.map((r) => ({
+    id: String(r.id),
+    title: String(r.title),
+    name: String(r.name),
+    description: String(r.description ?? ''),
+    avatarUrl: r.avatar_url ? String(r.avatar_url) : null,
+    createdAt: Number(r.created_at),
+  }));
+}
+
+export function getActiveUserPersona(): UserPersona | null {
+  const settings = getLlmSettings();
+  if (!settings.personasEnabled) return null;
+  const all = listUserPersonas();
+  return all.find((p) => p.id === settings.activePersonaId) ?? all[0] ?? null;
+}
+
+export function createUserPersona(input: Omit<UserPersona, 'id' | 'createdAt'>): UserPersona {
+  const db = getRawDb();
+  const id = `persona_${ulid().toLowerCase()}`;
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO user_personas (id, title, name, description, avatar_url, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(id, input.title, input.name, input.description, input.avatarUrl ?? null, now);
+  return listUserPersonas().find((p) => p.id === id)!;
+}
+
+export function updateUserPersona(id: string, input: Partial<Omit<UserPersona, 'id' | 'createdAt'>>): UserPersona | null {
+  const db = getRawDb();
+  const existing = listUserPersonas().find((p) => p.id === id);
+  if (!existing) return null;
+  const next = { ...existing, ...stripUndefined(input) };
+  db.prepare(`
+    UPDATE user_personas
+    SET title = ?, name = ?, description = ?, avatar_url = ?
+    WHERE id = ?
+  `).run(next.title, next.name, next.description, next.avatarUrl ?? null, id);
+  return listUserPersonas().find((p) => p.id === id) ?? null;
+}
+
+export function deleteUserPersona(id: string): void {
+  const db = getRawDb();
+  db.prepare('DELETE FROM user_personas WHERE id = ?').run(id);
+}
+
+// ==================== TAVERN LOREBOOKS & ENTRIES ====================
+export interface LorebookWithEntries extends Lorebook {
+  entries: LorebookEntry[];
+}
+
+export function listLorebooksWithEntries(): LorebookWithEntries[] {
+  const db = getRawDb();
+  const lbRows = db.prepare('SELECT * FROM lorebooks ORDER BY created_at ASC').all() as Record<string, unknown>[];
+  const entryRows = db.prepare('SELECT * FROM lorebook_entries ORDER BY created_at ASC').all() as Record<string, unknown>[];
+
+  const entriesByLb = new Map<string, LorebookEntry[]>();
+  for (const r of entryRows) {
+    const entry: LorebookEntry = {
+      id: String(r.id),
+      lorebookId: String(r.lorebook_id),
+      title: String(r.title),
+      keywords: String(r.keywords ?? ''),
+      content: String(r.content),
+      isConstant: Boolean(r.is_constant),
+      isEnabled: Boolean(r.is_enabled),
+      insertionPosition: (r.insertion_position as LorebookEntry['insertionPosition']) ?? 'after_scenario',
+      createdAt: Number(r.created_at),
+    };
+    const arr = entriesByLb.get(entry.lorebookId) ?? [];
+    arr.push(entry);
+    entriesByLb.set(entry.lorebookId, arr);
+  }
+
+  return lbRows.map((r) => {
+    const id = String(r.id);
+    return {
+      id,
+      title: String(r.title),
+      description: String(r.description ?? ''),
+      createdAt: Number(r.created_at),
+      entries: entriesByLb.get(id) ?? [],
+    };
+  });
+}
+
+export function createLorebook(input: { title: string; description?: string }): LorebookWithEntries {
+  const db = getRawDb();
+  const id = `lb_${ulid().toLowerCase()}`;
+  const now = Date.now();
+  db.prepare('INSERT INTO lorebooks (id, title, description, created_at) VALUES (?, ?, ?, ?)').run(
+    id,
+    input.title,
+    input.description ?? '',
+    now
+  );
+  return listLorebooksWithEntries().find((lb) => lb.id === id)!;
+}
+
+export function updateLorebook(id: string, input: { title?: string; description?: string }): LorebookWithEntries | null {
+  const db = getRawDb();
+  const existing = listLorebooksWithEntries().find((lb) => lb.id === id);
+  if (!existing) return null;
+  db.prepare('UPDATE lorebooks SET title = ?, description = ? WHERE id = ?').run(
+    input.title ?? existing.title,
+    input.description ?? existing.description,
+    id
+  );
+  return listLorebooksWithEntries().find((lb) => lb.id === id) ?? null;
+}
+
+export function deleteLorebook(id: string): void {
+  const db = getRawDb();
+  db.prepare('DELETE FROM lorebooks WHERE id = ?').run(id);
+}
+
+export function createLorebookEntry(input: Omit<LorebookEntry, 'id' | 'createdAt'>): LorebookEntry {
+  const db = getRawDb();
+  const id = `lbe_${ulid().toLowerCase()}`;
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO lorebook_entries (
+      id, lorebook_id, title, keywords, content, is_constant, is_enabled, insertion_position, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.lorebookId,
+    input.title,
+    input.keywords,
+    input.content,
+    input.isConstant ? 1 : 0,
+    input.isEnabled ? 1 : 0,
+    input.insertionPosition,
+    now
+  );
+  const lbs = listLorebooksWithEntries();
+  for (const lb of lbs) {
+    const found = lb.entries.find((e) => e.id === id);
+    if (found) return found;
+  }
+  throw new Error('Failed to create lorebook entry');
+}
+
+export function updateLorebookEntry(
+  id: string,
+  input: Partial<Omit<LorebookEntry, 'id' | 'lorebookId' | 'createdAt'>>
+): LorebookEntry | null {
+  const db = getRawDb();
+  const lbs = listLorebooksWithEntries();
+  let existing: LorebookEntry | undefined;
+  for (const lb of lbs) {
+    existing = lb.entries.find((e) => e.id === id);
+    if (existing) break;
+  }
+  if (!existing) return null;
+  const next = { ...existing, ...stripUndefined(input) };
+
+  db.prepare(`
+    UPDATE lorebook_entries
+    SET title = ?, keywords = ?, content = ?, is_constant = ?, is_enabled = ?, insertion_position = ?
+    WHERE id = ?
+  `).run(
+    next.title,
+    next.keywords,
+    next.content,
+    next.isConstant ? 1 : 0,
+    next.isEnabled ? 1 : 0,
+    next.insertionPosition,
+    id
+  );
+
+  for (const lb of listLorebooksWithEntries()) {
+    const found = lb.entries.find((e) => e.id === id);
+    if (found) return found;
+  }
+  return null;
+}
+
+export function deleteLorebookEntry(id: string): void {
+  const db = getRawDb();
+  db.prepare('DELETE FROM lorebook_entries WHERE id = ?').run(id);
 }

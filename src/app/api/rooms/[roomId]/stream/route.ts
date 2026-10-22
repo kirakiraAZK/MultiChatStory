@@ -38,6 +38,7 @@ export async function POST(
   const regenerateMessageId = body.regenerateMessageId ? String(body.regenerateMessageId) : null;
   const truncateSubsequent = Boolean(body.truncateSubsequent);
   const isManualTrigger = Boolean(body.isManualTrigger);
+  const directAddressTo = body.directAddressTo ? String(body.directAddressTo).trim() : undefined;
 
   let targetCharacterId: string | null = body.characterId ? String(body.characterId) : null;
   let beforeSequenceNumber: number | undefined = undefined;
@@ -81,12 +82,19 @@ export async function POST(
   const assembled = buildMultiCharacterPayload(roomId, targetCharacterId, {
     beforeSequenceNumber,
     temperatureOverride: typeof body.temperature === 'number' ? body.temperature : undefined,
+    directAddressTo,
   });
 
   const promptDebugJson = JSON.stringify(
     {
       model: assembled.model,
       temperature: assembled.temperature,
+      maxTokens: assembled.maxTokens,
+      topP: assembled.topP,
+      topK: assembled.topK,
+      minP: assembled.minP,
+      repetitionPenalty: assembled.repetitionPenalty,
+      matchedLoreTitles: assembled.matchedLoreTitles,
       stopSequences: assembled.stopSequences,
       messages: assembled.messages,
     },

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Trash2, X, Check, Image as ImageIcon } from 'lucide-react';
+import { Upload, Trash2, X, Check } from 'lucide-react';
 import { CharacterAvatar } from '../common/CharacterAvatar';
 import type { Character } from '@/lib/db/schema';
 
@@ -37,6 +37,7 @@ export function CharacterEditorModal({
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [systemPrompt, setSystemPrompt] = useState('');
   const [speakingStyle, setSpeakingStyle] = useState('');
+  const [overrideModelTuning, setOverrideModelTuning] = useState(false);
   const [modelId, setModelId] = useState('gpt-4o-mini');
   const [temperature, setTemperature] = useState(0.75);
   const [maxTokens, setMaxTokens] = useState(450);
@@ -53,6 +54,7 @@ export function CharacterEditorModal({
       setAvatarUrl(initialCharacter.avatarUrl ?? null);
       setSystemPrompt(initialCharacter.systemPrompt);
       setSpeakingStyle(initialCharacter.speakingStyle);
+      setOverrideModelTuning(Boolean(initialCharacter.overrideModelTuning));
       setModelId(initialCharacter.modelId || 'gpt-4o-mini');
       setTemperature(initialCharacter.temperature);
       setMaxTokens(initialCharacter.maxTokens);
@@ -63,6 +65,7 @@ export function CharacterEditorModal({
       setAvatarUrl(null);
       setSystemPrompt('');
       setSpeakingStyle('');
+      setOverrideModelTuning(false);
       setModelId('gpt-4o-mini');
       setTemperature(0.75);
       setMaxTokens(450);
@@ -108,6 +111,7 @@ export function CharacterEditorModal({
           avatarUrl,
           systemPrompt: systemPrompt.trim(),
           speakingStyle: speakingStyle.trim(),
+          overrideModelTuning,
           modelId: modelId.trim() || 'gpt-4o-mini',
           temperature,
           maxTokens,
@@ -129,7 +133,7 @@ export function CharacterEditorModal({
               {initialCharacter ? `Edit Character: ${initialCharacter.name}` : 'Create New AI Character'}
             </h3>
             <p className="text-xs text-slate-400">
-              Upload a portrait, define their persona & speaking style
+              Upload a portrait, define their persona & speaking style (supports {'{{user}}'} and {'{{char}}'})
             </p>
           </div>
           <button
@@ -230,17 +234,17 @@ export function CharacterEditorModal({
             </div>
           </div>
 
-          {/* Core System Prompt */}
+          {/* Core Character Persona */}
           <div>
             <label className="block text-xs font-medium text-slate-300 mb-1">
-              Core System Prompt (Personality, background, motives, boundaries) *
+              Character Persona & Bio (Personality, background, motives) *
             </label>
             <textarea
               rows={5}
               required
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
-              placeholder="You are... Describe their personality traits, knowledge, secrets, and how they interact with others."
+              placeholder="You are... Describe their personality traits, knowledge, secrets, and how they interact with {{user}} and other characters."
               className="w-full rounded-lg border border-slate-700 bg-slate-950 p-3 text-xs text-white leading-relaxed focus:border-indigo-500 focus:outline-none"
             />
           </div>
@@ -259,51 +263,72 @@ export function CharacterEditorModal({
             />
           </div>
 
-          {/* Model, Temperature, Max Tokens */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
-                Model Override
-              </label>
-              <input
-                type="text"
-                value={modelId}
-                onChange={(e) => setModelId(e.target.value)}
-                placeholder="gpt-4o-mini"
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white"
-              />
-            </div>
-
-            <div>
-              <div className="flex justify-between text-xs text-slate-300 mb-1">
-                <span>Temperature</span>
-                <span className="font-mono text-indigo-300">{temperature}</span>
+          {/* Optional Per-Character Model & Tuning Override */}
+          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
+            <label className="flex items-center justify-between cursor-pointer">
+              <div>
+                <div className="text-xs font-semibold text-slate-200">
+                  Override Tavern Model & Tuning for this Character
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  When unchecked, this character uses the shared Model & Sampler settings from Tavern Chat Settings.
+                </div>
               </div>
               <input
-                type="range"
-                min={0.1}
-                max={1.2}
-                step={0.05}
-                value={temperature}
-                onChange={(e) => setTemperature(Number(e.target.value))}
-                className="w-full accent-indigo-500 mt-1.5"
+                type="checkbox"
+                checked={overrideModelTuning}
+                onChange={(e) => setOverrideModelTuning(e.target.checked)}
+                className="h-4 w-4 rounded accent-indigo-500"
               />
-            </div>
+            </label>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
-                Max Tokens
-              </label>
-              <input
-                type="number"
-                min={100}
-                max={2000}
-                step={50}
-                value={maxTokens}
-                onChange={(e) => setMaxTokens(Number(e.target.value))}
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white"
-              />
-            </div>
+            {overrideModelTuning && (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-800">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Custom Model ID
+                  </label>
+                  <input
+                    type="text"
+                    value={modelId}
+                    onChange={(e) => setModelId(e.target.value)}
+                    placeholder="gpt-4o-mini"
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-xs text-slate-300 mb-1">
+                    <span>Temperature</span>
+                    <span className="font-mono text-indigo-300">{temperature}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={1.5}
+                    step={0.05}
+                    value={temperature}
+                    onChange={(e) => setTemperature(Number(e.target.value))}
+                    className="w-full accent-indigo-500 mt-1.5"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Max Tokens
+                  </label>
+                  <input
+                    type="number"
+                    min={50}
+                    max={2000}
+                    step={50}
+                    value={maxTokens}
+                    onChange={(e) => setMaxTokens(Number(e.target.value))}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white"
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">

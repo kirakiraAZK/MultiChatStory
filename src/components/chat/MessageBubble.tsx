@@ -22,6 +22,7 @@ import { CharacterAvatar } from '../common/CharacterAvatar';
 interface MessageBubbleProps {
   message: MessageWithVersions;
   character?: Character;
+  userAvatarUrl?: string | null;
   isLatestMessage: boolean;
   isStreamingThisMessage: boolean;
   liveStreamContent: string;
@@ -54,6 +55,7 @@ function renderFormattedDialogue(text: string) {
 export function MessageBubble({
   message,
   character,
+  userAvatarUrl,
   isLatestMessage,
   isStreamingThisMessage,
   liveStreamContent,
@@ -118,12 +120,21 @@ export function MessageBubble({
         <div className="flex items-center gap-2.5">
           {/* Avatar */}
           {isUser ? (
-            <div
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold text-white shadow-sm"
-              style={{ backgroundColor: accentColor }}
-            >
-              <User className="h-4 w-4" />
-            </div>
+            userAvatarUrl ? (
+              <CharacterAvatar
+                name={message.senderNameSnapshot}
+                avatarColor={accentColor}
+                avatarUrl={userAvatarUrl}
+                size="md"
+              />
+            ) : (
+              <div
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold text-white shadow-sm"
+                style={{ backgroundColor: accentColor }}
+              >
+                <User className="h-4 w-4" />
+              </div>
+            )
           ) : (
             <CharacterAvatar
               name={message.senderNameSnapshot}

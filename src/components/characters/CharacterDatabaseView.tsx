@@ -84,6 +84,7 @@ export function CharacterDatabaseView({
       avatarUrl: c.avatarUrl,
       systemPrompt: c.systemPrompt,
       speakingStyle: c.speakingStyle,
+      overrideModelTuning: c.overrideModelTuning,
       modelId: c.modelId,
       temperature: c.temperature,
       maxTokens: c.maxTokens,

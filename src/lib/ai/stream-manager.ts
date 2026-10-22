@@ -63,22 +63,35 @@ export async function* generateCharacterTokenStream(
 
     const modelToUse = payload.model || settings.defaultModel || 'gpt-4o-mini';
 
+    // Include OpenAI-standard samplers + extended OpenRouter / vLLM / Ollama / KoboldCPP parameters
+    const requestBody: Record<string, unknown> = {
+      model: modelToUse,
+      messages: payload.messages,
+      temperature: payload.temperature,
+      max_tokens: payload.maxTokens,
+      top_p: payload.topP,
+      frequency_penalty: payload.frequencyPenalty,
+      presence_penalty: payload.presencePenalty,
+      stop: payload.stopSequences.length > 0 ? payload.stopSequences : undefined,
+      stream: true,
+    };
+
+    // Pass top_k, min_p, repetition_penalty for providers that support them (OpenRouter, Ollama, LM Studio, vLLM)
+    if (!settings.baseUrl.includes('api.openai.com')) {
+      requestBody.top_k = payload.topK;
+      requestBody.min_p = payload.minP;
+      requestBody.repetition_penalty = payload.repetitionPenalty;
+    }
+
     const stream = await client.chat.completions.create(
-      {
-        model: modelToUse,
-        messages: payload.messages,
-        temperature: payload.temperature,
-        max_tokens: payload.maxTokens,
-        stop: payload.stopSequences.length > 0 ? payload.stopSequences : undefined,
-        stream: true,
-      },
+      requestBody as unknown as Parameters<typeof client.chat.completions.create>[0],
       { signal }
     );
 
     let initialBuffer = '';
     let prefixStripped = false;
 
-    for await (const chunk of stream) {
+    for await (const chunk of stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>) {
       if (signal.aborted) break;
       const delta = chunk.choices[0]?.delta?.content ?? '';
       if (!delta) continue;
@@ -116,7 +129,6 @@ async function* generateSimulatedCharacterStream(
   signal: AbortSignal
 ): AsyncGenerator<string, void, unknown> {
   const char = payload.targetCharacter;
-  // Extract the most recent user/other-character message from the assembled payload
   const userTurns = payload.messages.filter((m) => m.role === 'user');
   const lastTurnRaw =
     typeof userTurns[userTurns.length - 1]?.content === 'string'
@@ -129,9 +141,14 @@ async function* generateSimulatedCharacterStream(
     ? speakerMatch[2].replace(/\*[^*]+\*/g, '').trim().slice(0, 90)
     : 'the situation at hand';
 
+  const loreHint =
+    payload.matchedLoreTitles.length > 0
+      ? ` (recalling lore: ${payload.matchedLoreTitles[0]})`
+      : '';
+
   const templatesByRole: Record<string, string[]> = {
     'Sherlock Holmes': [
-      `*lifts his eyes sharply from the table toward ${prevSpeaker}* You are looking at the surface, yet missing the decisive detail entirely. Consider what was just said—"${prevExcerpt || 'that observation'}"—if the cipher had truly been burned by accident, the wax seal would show thermal blistering. It does not. Someone wanted us to read only the surviving four lines.`,
+      `*lifts his eyes sharply from the table toward ${prevSpeaker}${loreHint}* You are looking at the surface, yet missing the decisive detail entirely. Consider what was just said—"${prevExcerpt || 'that observation'}"—if the cipher had truly been burned by accident, the wax seal would show thermal blistering. It does not. Someone wanted us to read only the surviving four lines.`,
       `*taps the brass cylinder twice against his palm and exchanges a swift glance with ${prevSpeaker}* Quite so, though the inference goes a step further. The white camellia is cultivated in only two conservatories in London during October. Whoever sent this message is already watching our door.`,
       `*paces once before the fireplace, fingertips pressed together* Let us test that hypothesis immediately. If ${prevSpeaker} is right, then the second column of figures isn't a naval coordinate at all—it is a train timetable from Paddington.`,
     ],

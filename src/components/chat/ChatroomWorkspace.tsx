@@ -11,22 +11,31 @@ import {
   Trash2,
   MessagesSquare,
   Database,
+  Sliders,
+  UserCheck,
+  Cpu,
 } from 'lucide-react';
 import { useRoomOrchestrator } from '@/store/useRoomOrchestrator';
 import { MessageBubble } from './MessageBubble';
 import { OrchestratorBar } from '../controls/OrchestratorBar';
 import { RosterSidebar } from '../controls/RosterSidebar';
-import { LlmSettingsModal } from '../modals/LlmSettingsModal';
+import { TavernSettingsModal, type TavernSettingsTab } from '../modals/TavernSettingsModal';
 import { CreateRoomModal } from '../modals/CreateRoomModal';
 import { CharacterEditorModal } from '../modals/CharacterEditorModal';
 import { CharacterDatabaseView } from '../characters/CharacterDatabaseView';
 import { CharacterAvatar } from '../common/CharacterAvatar';
 import type { RoomWithDetails, MessageWithVersions } from '@/lib/db';
-import type { Character } from '@/lib/db/schema';
+import type { Character, LlmSettings, UserPersona, SystemPromptPreset } from '@/lib/db/schema';
 
 interface RoomApiPayload extends RoomWithDetails {
   messages: MessageWithVersions[];
   suggestedNextCharacterId: string | null;
+}
+
+interface UnifiedTavernSettingsResponse {
+  settings: LlmSettings;
+  systemPrompts: SystemPromptPreset[];
+  userPersonas: UserPersona[];
 }
 
 export function ChatroomWorkspace() {
@@ -36,7 +45,9 @@ export function ChatroomWorkspace() {
   const [userMessageInput, setUserMessageInput] = useState('');
   const [messageMode, setMessageMode] = useState<'user' | 'system'>('user');
   const [autoReplyOnSend, setAutoReplyOnSend] = useState(true);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  const [isTavernSettingsOpen, setIsTavernSettingsOpen] = useState(false);
+  const [tavernInitialTab, setTavernInitialTab] = useState<TavernSettingsTab>('model');
   const [isCreateRoomOpen, setIsCreateRoomOpen] = useState(false);
   const [isQuickCharCreateOpen, setIsQuickCharCreateOpen] = useState(false);
 
@@ -85,8 +96,24 @@ export function ChatroomWorkspace() {
     },
   });
 
+  // Fetch unified Tavern Settings (for active Persona, Model, and System Prompt badges)
+  const { data: tavernData } = useQuery<UnifiedTavernSettingsResponse>({
+    queryKey: ['tavern_settings'],
+    queryFn: async () => {
+      const res = await fetch('/api/settings');
+      return res.json();
+    },
+  });
+
   const roomsList = roomsData?.rooms ?? [];
   const allCharacters = charactersData?.characters ?? [];
+
+  const activeUserPersona =
+    tavernData?.settings.personasEnabled
+      ? tavernData.userPersonas.find((p) => p.id === tavernData.settings.activePersonaId) ??
+        tavernData.userPersonas[0] ??
+        null
+      : null;
 
   // Select first room on initial load
   useEffect(() => {
@@ -132,6 +159,7 @@ export function ChatroomWorkspace() {
       regenerateMessageId?: string;
       truncateSubsequent?: boolean;
       isManualTrigger?: boolean;
+      directAddressTo?: string;
     }) => {
       if (!selectedRoomId) return;
 
@@ -151,6 +179,7 @@ export function ChatroomWorkspace() {
             regenerateMessageId: options?.regenerateMessageId,
             truncateSubsequent: options?.truncateSubsequent,
             isManualTrigger: options?.isManualTrigger,
+            directAddressTo: options?.directAddressTo,
           }),
           signal: controller.signal,
         });
@@ -289,6 +318,11 @@ export function ChatroomWorkspace() {
     dispatchCharacterStream,
   ]);
 
+  const openTavernSettings = (tab: TavernSettingsTab = 'model') => {
+    setTavernInitialTab(tab);
+    setIsTavernSettingsOpen(true);
+  };
+
   // Handlers
   const handleCreateCharacterApi = async (
     input: Omit<Character, 'id' | 'createdAt'>
@@ -330,6 +364,9 @@ export function ChatroomWorkspace() {
     }
   };
 
+  const effectiveUserDisplayName =
+    activeUserPersona?.name || activeRoomData?.room.userDisplayName || 'Director';
+
   const handleSendUserMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedRoomId || !userMessageInput.trim()) return;
@@ -347,6 +384,7 @@ export function ChatroomWorkspace() {
       body: JSON.stringify({
         content: text,
         senderType: messageMode,
+        senderName: effectiveUserDisplayName,
       }),
     });
 
@@ -389,7 +427,7 @@ export function ChatroomWorkspace() {
     }
   };
 
-  const handleTriggerSpecificCharacter = (characterId: string) => {
+  const handleTriggerSpecificCharacter = (characterId: string, directAddressTo?: string) => {
     if (!selectedRoomId) return;
     if (executionState === 'STREAMING') {
       abortCurrentStream(selectedRoomId);
@@ -398,6 +436,7 @@ export function ChatroomWorkspace() {
     dispatchCharacterStream({
       characterId,
       isManualTrigger: true,
+      directAddressTo,
     });
   };
 
@@ -453,6 +492,7 @@ export function ChatroomWorkspace() {
       body: JSON.stringify({
         title: input.title,
         scenarioPrompt: input.scenarioPrompt,
+        userDisplayName: effectiveUserDisplayName,
         roster: input.rosterCharacterIds.map((characterId) => ({ characterId })),
       }),
     });
@@ -495,7 +535,7 @@ export function ChatroomWorkspace() {
             </div>
             <div>
               <h1 className="text-sm font-bold tracking-tight text-white">MultiChat Studio</h1>
-              <p className="text-[10px] text-slate-400">Multi-Agent Story Engine</p>
+              <p className="text-[10px] text-slate-400">Multi-Agent Tavern Engine</p>
             </div>
           </div>
         </div>
@@ -617,19 +657,19 @@ export function ChatroomWorkspace() {
           })}
         </div>
 
-        {/* Bottom LLM Provider Settings Button */}
+        {/* Bottom Unified Tavern Chat & Engine Settings Button */}
         <div className="border-t border-slate-800 p-3">
           <button
             type="button"
-            onClick={() => setIsSettingsOpen(true)}
-            className="flex w-full items-center justify-between rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2.5 text-xs font-medium text-slate-300 hover:border-slate-700 hover:text-white cursor-pointer transition"
+            onClick={() => openTavernSettings('model')}
+            className="flex w-full items-center justify-between rounded-xl border border-indigo-500/40 bg-indigo-950/30 px-3 py-2.5 text-xs font-semibold text-indigo-200 hover:bg-indigo-900/40 hover:text-white cursor-pointer transition"
           >
             <span className="flex items-center gap-2">
               <Settings className="h-4 w-4 text-indigo-400" />
-              AI Provider & API Key
+              Tavern Chat Settings
             </span>
-            <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300">
-              Ready
+            <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] text-indigo-300">
+              7 Tabs
             </span>
           </button>
         </div>
@@ -652,9 +692,9 @@ export function ChatroomWorkspace() {
       ) : activeRoomData ? (
         <>
           <main className="flex flex-1 flex-col min-w-0">
-            {/* Room Header */}
-            <header className="flex items-center justify-between border-b border-slate-800/80 bg-slate-900/60 px-6 py-3">
-              <div className="min-w-0">
+            {/* Room Header with Quick Tavern Pills */}
+            <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 bg-slate-900/60 px-6 py-3">
+              <div className="min-w-0 flex-1">
                 <h2 className="truncate text-base font-bold text-white">
                   {activeRoomData.room.title}
                 </h2>
@@ -662,17 +702,38 @@ export function ChatroomWorkspace() {
                   {activeRoomData.room.scenarioPrompt || 'No scenario description set'}
                 </p>
               </div>
-              <div className="flex items-center gap-2 text-xs text-slate-400 shrink-0">
-                <span className="rounded-md border border-slate-800 bg-slate-900 px-2.5 py-1">
-                  Strategy:{' '}
-                  <strong className="text-slate-200">
-                    {activeRoomData.room.turnStrategy === 'round_robin'
-                      ? 'Round-Robin'
-                      : activeRoomData.room.turnStrategy === 'dynamic_router'
-                      ? 'Dynamic Router'
-                      : 'Manual Only'}
-                  </strong>
-                </span>
+
+              <div className="flex items-center gap-2 text-xs shrink-0">
+                <button
+                  type="button"
+                  onClick={() => openTavernSettings('model')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1 text-slate-300 hover:border-indigo-500/50 hover:text-white cursor-pointer"
+                  title="Active Model & Sampler Tuning"
+                >
+                  <Cpu className="h-3.5 w-3.5 text-indigo-400" />
+                  <span className="font-mono text-[11px]">
+                    {tavernData?.settings.defaultModel.split('/').pop() || 'gpt-4o-mini'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => openTavernSettings('persona')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1 text-slate-300 hover:border-indigo-500/50 hover:text-white cursor-pointer"
+                  title="Active User Persona ({{user}})"
+                >
+                  <UserCheck className="h-3.5 w-3.5 text-blue-400" />
+                  <span>{effectiveUserDisplayName}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => openTavernSettings('scenario')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/50 bg-indigo-600/20 px-3 py-1 font-semibold text-indigo-200 hover:bg-indigo-600/30 cursor-pointer"
+                >
+                  <Sliders className="h-3.5 w-3.5" />
+                  Chat Settings
+                </button>
               </div>
             </header>
 
@@ -718,6 +779,7 @@ export function ChatroomWorkspace() {
                       key={msg.id}
                       message={msg}
                       character={msg.characterId ? characterMap.get(msg.characterId) : undefined}
+                      userAvatarUrl={activeUserPersona?.avatarUrl}
                       isLatestMessage={idx === messages.length - 1}
                       isStreamingThisMessage={isStreamingThis}
                       liveStreamContent={isStreamingThis ? streamingContent : ''}
@@ -752,7 +814,7 @@ export function ChatroomWorkspace() {
                         : 'text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    Speak as {activeRoomData.room.userDisplayName}
+                    Speak as {effectiveUserDisplayName}
                   </button>
                   <button
                     type="button"
@@ -787,7 +849,7 @@ export function ChatroomWorkspace() {
                   placeholder={
                     messageMode === 'system'
                       ? 'Enter a shared stage event (e.g., "The lights suddenly flicker out and a shot rings in the street below.")...'
-                      : `Intervene as ${activeRoomData.room.userDisplayName}... (Use *asterisks* for physical actions)`
+                      : `Intervene as ${effectiveUserDisplayName}... (Use *asterisks* for physical actions)`
                   }
                   className="flex-1 rounded-xl border border-slate-700/90 bg-slate-950 px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
                 />
@@ -811,6 +873,7 @@ export function ChatroomWorkspace() {
             activeCharacterId={activeCharacterId}
             nextCharacterId={nextCharacterId}
             isStreaming={executionState === 'STREAMING'}
+            activeUserDisplayName={effectiveUserDisplayName}
             onTriggerCharacter={handleTriggerSpecificCharacter}
             onUpdateRoomSettings={async (patch) => {
               await fetch(`/api/rooms/${activeRoomData.room.id}`, {
@@ -823,6 +886,7 @@ export function ChatroomWorkspace() {
             }}
             onCreateCharacter={handleCreateCharacterApi}
             onUpdateCharacter={handleUpdateCharacterApi}
+            onOpenTavernSettings={(tab) => openTavernSettings(tab)}
           />
         </>
       ) : (
@@ -831,8 +895,29 @@ export function ChatroomWorkspace() {
         </div>
       )}
 
-      {/* LLM Settings Modal */}
-      <LlmSettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      {/* Unified Moescape-Style 3-Pane Tavern Settings Modal */}
+      <TavernSettingsModal
+        isOpen={isTavernSettingsOpen}
+        initialTab={tavernInitialTab}
+        activeRoom={activeRoomData?.room ?? null}
+        onClose={() => setIsTavernSettingsOpen(false)}
+        onUpdateRoom={async (patch) => {
+          if (!activeRoomData?.room.id) return;
+          await fetch(`/api/rooms/${activeRoomData.room.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch),
+          });
+          await queryClient.invalidateQueries({ queryKey: ['room', activeRoomData.room.id] });
+          await queryClient.invalidateQueries({ queryKey: ['rooms'] });
+        }}
+        onSettingsChanged={() => {
+          queryClient.invalidateQueries({ queryKey: ['tavern_settings'] });
+          if (activeRoomData?.room.id) {
+            queryClient.invalidateQueries({ queryKey: ['room', activeRoomData.room.id] });
+          }
+        }}
+      />
 
       {/* Scalable Create Multi-Character Room Modal */}
       <CreateRoomModal
@@ -843,7 +928,7 @@ export function ChatroomWorkspace() {
         onOpenNewCharacterModal={() => setIsQuickCharCreateOpen(true)}
       />
 
-      {/* Quick Create Character Modal (Opened from inside Create Room Modal) */}
+      {/* Quick Create Character Modal */}
       <CharacterEditorModal
         isOpen={isQuickCharCreateOpen}
         initialCharacter={null}

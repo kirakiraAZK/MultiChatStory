@@ -4,6 +4,7 @@ import {
   createMessage,
   getRoomWithDetails,
   updateRoomQueueState,
+  getActiveUserPersona,
 } from '@/lib/db';
 import { resolveNextCharacterId } from '@/lib/ai/turn-scheduler';
 
@@ -32,11 +33,17 @@ export async function POST(
     return NextResponse.json({ error: 'Message content cannot be empty' }, { status: 400 });
   }
 
+  const activePersona = getActiveUserPersona();
   const senderType = body.senderType === 'system' ? 'system' : 'user';
   const senderNameSnapshot =
     senderType === 'system'
       ? 'Stage Direction'
-      : String(body.senderName || details.room.userDisplayName || 'Director');
+      : String(
+          body.senderName ||
+            activePersona?.name ||
+            details.room.userDisplayName ||
+            'Director'
+        );
 
   const created = createMessage({
     roomId,
@@ -47,7 +54,6 @@ export async function POST(
     status: 'completed',
   });
 
-  // Reset consecutive auto-turn counter on human intervention and compute next character
   const nextCharId = resolveNextCharacterId(roomId);
   updateRoomQueueState(roomId, {
     consecutiveAutoTurns: 0,
