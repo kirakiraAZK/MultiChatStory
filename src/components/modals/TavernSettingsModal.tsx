@@ -52,6 +52,7 @@ interface TavernSettingsModalProps {
   onClose: () => void;
   onUpdateRoom: (patch: Partial<Room>) => Promise<void>;
   onSettingsChanged: () => void;
+  onRequestDeleteRoom?: (roomId: string) => void;
 }
 
 interface UnifiedSettingsPayload {
@@ -76,6 +77,7 @@ export function TavernSettingsModal({
   onClose,
   onUpdateRoom,
   onSettingsChanged,
+  onRequestDeleteRoom,
 }: TavernSettingsModalProps) {
   const [activeTab, setActiveTab] = useState<TavernSettingsTab>(initialTab);
   const [data, setData] = useState<UnifiedSettingsPayload | null>(null);
@@ -142,6 +144,8 @@ export function TavernSettingsModal({
   // ==================== 7. LOREBOOK STATE ====================
   const [activeRoomLorebookIds, setActiveRoomLorebookIds] = useState<string[]>([]);
   const [selectedLorebookId, setSelectedLorebookId] = useState<string | null>(null);
+  const [lorebookTitleDraft, setLorebookTitleDraft] = useState('');
+  const [lorebookDescDraft, setLorebookDescDraft] = useState('');
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
   const [entryTitleDraft, setEntryTitleDraft] = useState('');
   const [entryKeywordsDraft, setEntryKeywordsDraft] = useState('');
@@ -215,6 +219,8 @@ export function TavernSettingsModal({
     if (payload.lorebooks.length > 0 && !selectedLorebookId) {
       const firstLb = payload.lorebooks[0];
       setSelectedLorebookId(firstLb.id);
+      setLorebookTitleDraft(firstLb.title);
+      setLorebookDescDraft(firstLb.description || '');
       if (firstLb.entries.length > 0) {
         const firstEntry = firstLb.entries[0];
         setSelectedEntryId(firstEntry.id);
@@ -224,6 +230,12 @@ export function TavernSettingsModal({
         setEntryConstantDraft(firstEntry.isConstant);
         setEntryEnabledDraft(firstEntry.isEnabled);
         setEntryPositionDraft(firstEntry.insertionPosition);
+      }
+    } else if (selectedLorebookId) {
+      const currentLb = payload.lorebooks.find((lb) => lb.id === selectedLorebookId);
+      if (currentLb) {
+        setLorebookTitleDraft(currentLb.title);
+        setLorebookDescDraft(currentLb.description || '');
       }
     }
   };
@@ -611,7 +623,29 @@ export function TavernSettingsModal({
     const newest = updated.lorebooks[updated.lorebooks.length - 1];
     if (newest) {
       setSelectedLorebookId(newest.id);
+      setLorebookTitleDraft(newest.title);
+      setLorebookDescDraft(newest.description || '');
       setSelectedEntryId(null);
+    }
+  };
+
+  const handleSaveLorebook = async () => {
+    if (!selectedLorebookId || !lorebookTitleDraft.trim()) return;
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'update_lorebook',
+        id: selectedLorebookId,
+        title: lorebookTitleDraft.trim(),
+        description: lorebookDescDraft.trim(),
+      }),
+    });
+    if (res.ok) {
+      const updated: UnifiedSettingsPayload = await res.json();
+      setData(updated);
+      onSettingsChanged();
+      triggerToast('Lorebook Name Saved');
     }
   };
 
@@ -642,7 +676,7 @@ export function TavernSettingsModal({
 
   const handleSaveLoreEntry = async () => {
     if (!selectedEntryId) return;
-    await fetch('/api/settings', {
+    const res = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -656,7 +690,11 @@ export function TavernSettingsModal({
         insertionPosition: entryPositionDraft,
       }),
     });
-    await loadSettingsData();
+    if (res.ok) {
+      const updated: UnifiedSettingsPayload = await res.json();
+      setData(updated);
+      onSettingsChanged();
+    }
     triggerToast('Lorebook Entry Saved');
   };
 
@@ -1921,6 +1959,26 @@ export function TavernSettingsModal({
                   />
                 </div>
               </div>
+
+              {activeRoom && onRequestDeleteRoom && (
+                <div className="rounded-xl border border-rose-500/30 bg-rose-950/20 p-4 space-y-2.5">
+                  <div className="text-xs font-bold text-rose-300">Danger Zone</div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Permanently delete <strong className="text-slate-200">{activeRoom.title}</strong> and all of its messages and turn history. Your characters in the Character Database will not be deleted.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onRequestDeleteRoom(activeRoom.id);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-600/20 px-3 py-2 text-xs font-semibold text-rose-200 hover:bg-rose-600 hover:text-white cursor-pointer transition"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete This Chatroom
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="flex w-1/2 flex-col bg-slate-950">
@@ -2005,6 +2063,8 @@ export function TavernSettingsModal({
                       key={lb.id}
                       onClick={() => {
                         setSelectedLorebookId(lb.id);
+                        setLorebookTitleDraft(lb.title);
+                        setLorebookDescDraft(lb.description || '');
                         if (lb.entries[0]) handleSelectLoreEntry(lb.entries[0]);
                         else setSelectedEntryId(null);
                       }}
@@ -2054,6 +2114,45 @@ export function TavernSettingsModal({
                   );
                 })}
               </div>
+
+              {/* Selected Lorebook Name & Description Editor */}
+              {selectedLorebookObj && (
+                <div className="border-b border-slate-800 bg-slate-900/50 px-4 py-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-semibold text-slate-300">
+                      Lorebook Name
+                    </label>
+                    <span className="text-[10px] text-slate-500">
+                      {activeRoomLorebookIds.includes(selectedLorebookObj.id)
+                        ? 'Attached to current room'
+                        : 'Not attached to room'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={lorebookTitleDraft}
+                      onChange={(e) => setLorebookTitleDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleSaveLorebook();
+                        }
+                      }}
+                      placeholder="Lorebook Name (e.g., Hololive Lore, Cyberpunk 2077)"
+                      className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-white focus:border-indigo-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveLorebook}
+                      disabled={!lorebookTitleDraft.trim()}
+                      className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-40 cursor-pointer transition shrink-0"
+                    >
+                      Save Name
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Entries inside Selected Lorebook */}
               <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800/80">

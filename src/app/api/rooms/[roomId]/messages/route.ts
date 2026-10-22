@@ -6,7 +6,10 @@ import {
   updateRoomQueueState,
   getActiveUserPersona,
 } from '@/lib/db';
-import { resolveNextCharacterId } from '@/lib/ai/turn-scheduler';
+import {
+  resolveNextCharacterId,
+  extractMentionedCharacterIds,
+} from '@/lib/ai/turn-scheduler';
 
 export async function GET(
   _req: Request,
@@ -54,16 +57,26 @@ export async function POST(
     status: 'completed',
   });
 
-  const nextCharId = resolveNextCharacterId(roomId);
+  const mentionedCharacterIds = extractMentionedCharacterIds(content, details.roster);
+  const nextCharId =
+    mentionedCharacterIds.length > 0
+      ? mentionedCharacterIds[0]
+      : resolveNextCharacterId(roomId);
+
+  const remainingMentionQueue =
+    mentionedCharacterIds.length > 1 ? mentionedCharacterIds.slice(1) : [];
+
   updateRoomQueueState(roomId, {
     consecutiveAutoTurns: 0,
     nextCharacterId: nextCharId,
+    queuedCharacterIdsJson: JSON.stringify(remainingMentionQueue),
   });
 
   return NextResponse.json(
     {
       message: created,
       nextCharacterId: nextCharId,
+      mentionedCharacterIds,
     },
     { status: 201 }
   );

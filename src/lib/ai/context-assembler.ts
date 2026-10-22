@@ -7,6 +7,7 @@ import {
   listSystemPrompts,
   getActiveUserPersona,
   listLorebooksWithEntries,
+  resolveCharacterOutfit,
 } from '@/lib/db';
 import type { Character } from '@/lib/db/schema';
 
@@ -158,12 +159,62 @@ export function buildMultiCharacterPayload(
   for (const member of roster) {
     participantNames.add(member.character.name);
     if (member.characterId === targetCharacter.id) continue;
+    const { activeOutfit: memberOutfit } = resolveCharacterOutfit(
+      member.character,
+      member.activeOutfitId
+    );
+    const appearanceSnippet = [
+      member.character.appearance?.trim(),
+      memberOutfit
+        ? `Currently wearing "${memberOutfit.name}": ${memberOutfit.appearanceDescription}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' | ');
+
     otherParticipantsLines.push(
-      `- ${member.character.name} (${member.character.roleTitle})${
+      `- ${member.character.name} (${member.character.roleTitle}) — Mention tag: @${member.character.name}${
         member.isActive ? '' : ' [Currently Inactive]'
+      }${appearanceSnippet ? ` — Appearance: ${appearanceSnippet}` : ''}`
+    );
+  }
+
+  const { activeOutfit: targetActiveOutfit } = resolveCharacterOutfit(
+    targetCharacter,
+    rosterEntry?.activeOutfitId
+  );
+
+  const appearanceAndOutfitLines: string[] = [];
+  if (targetCharacter.appearance?.trim()) {
+    appearanceAndOutfitLines.push(
+      `Base Physical Appearance: ${replaceTavernMacros(
+        targetCharacter.appearance.trim(),
+        targetCharacter.name,
+        effectiveUserName
+      )}`
+    );
+  }
+  if (targetActiveOutfit) {
+    appearanceAndOutfitLines.push(
+      `Current Equipped Outfit / Costume (${targetActiveOutfit.name}): ${replaceTavernMacros(
+        targetActiveOutfit.appearanceDescription.trim(),
+        targetCharacter.name,
+        effectiveUserName
+      )}${
+        targetActiveOutfit.behaviorModifier?.trim()
+          ? ` | Outfit Mood/Behavior Note: ${replaceTavernMacros(
+              targetActiveOutfit.behaviorModifier.trim(),
+              targetCharacter.name,
+              effectiveUserName
+            )}`
+          : ''
       }`
     );
   }
+  const appearanceSection =
+    appearanceAndOutfitLines.length > 0
+      ? `\n### YOUR APPEARANCE & CURRENT OUTFIT\n${appearanceAndOutfitLines.join('\n')}`
+      : '';
 
   const relationshipSection = rosterEntry?.relationshipContext?.trim()
     ? `\n### YOUR RELATIONSHIPS IN THIS ROOM\n${replaceTavernMacros(
@@ -219,6 +270,7 @@ export function buildMultiCharacterPayload(
       targetCharacter.name,
       effectiveUserName
     ),
+    appearanceSection,
     speakingStyleSection,
     relationshipSection,
     `### OTHER PARTICIPANTS IN THIS ROOM`,
@@ -228,6 +280,7 @@ export function buildMultiCharacterPayload(
     `2. Respond directly to the latest developments in the transcript.`,
     `3. NEVER write dialogue, thoughts, or actions on behalf of ${effectiveUserName} or any other character.`,
     `4. Do NOT prefix your response with "[${targetCharacter.name}]:" or "${targetCharacter.name}:". Output your dialogue and actions directly.`,
+    `5. You can mention another character in the room using their @mention tag (e.g., @CharacterName) if you want to directly ask them a question or pass the floor so they speak next.`,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -271,15 +324,30 @@ export function buildMultiCharacterPayload(
   }
 
   // Post-history anchor
+  const lastWindowMsg = windowedMessages[windowedMessages.length - 1];
+  const wasDirectlyMentioned =
+    lastWindowMsg &&
+    new RegExp(
+      `@(?:${targetCharacter.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|${
+        targetCharacter.name.split(' ')[0]?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') || ''
+      })(?![a-zA-Z0-9_])`,
+      'i'
+    ).test(lastWindowMsg.content);
+
+  const mentionContextNote =
+    wasDirectlyMentioned && lastWindowMsg
+      ? ` You were just directly @mentioned by ${lastWindowMsg.senderNameSnapshot}—respond directly to what they said to you.`
+      : '';
+
   const addressInstruction = options?.directAddressTo?.trim()
-    ? ` Address your dialogue, observation, or question directly to ${options.directAddressTo.trim()}.`
+    ? ` Address your dialogue, observation, or question directly to ${options.directAddressTo.trim()} (you may include @${options.directAddressTo.trim()}).`
     : '';
 
   apiMessages.push({
     role: 'system',
     content: `[System Directive]: Now respond strictly as ${targetCharacter.name}.${
       targetCharacter.speakingStyle ? ` Maintain style: ${targetCharacter.speakingStyle}` : ''
-    }${addressInstruction} Do not prefix your message with your name and do not write turns for any other participant.`,
+    }${mentionContextNote}${addressInstruction} Do not prefix your message with your name and do not write turns for any other participant.`,
   });
 
   const stopSequences: string[] = [];

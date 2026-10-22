@@ -10,10 +10,11 @@ import {
   Sparkles,
   MessagesSquare,
   SlidersHorizontal,
+  Shirt,
 } from 'lucide-react';
 import { CharacterAvatar } from '../common/CharacterAvatar';
 import { CharacterEditorModal } from '../modals/CharacterEditorModal';
-import type { Character } from '@/lib/db/schema';
+import type { Character, CharacterOutfit } from '@/lib/db/schema';
 import type { RoomWithDetails } from '@/lib/db';
 
 interface CharacterDatabaseViewProps {
@@ -82,6 +83,9 @@ export function CharacterDatabaseView({
       roleTitle: c.roleTitle,
       avatarColor: c.avatarColor,
       avatarUrl: c.avatarUrl,
+      appearance: c.appearance,
+      outfitsJson: c.outfitsJson,
+      activeOutfitId: c.activeOutfitId,
       systemPrompt: c.systemPrompt,
       speakingStyle: c.speakingStyle,
       overrideModelTuning: c.overrideModelTuning,
@@ -166,6 +170,14 @@ export function CharacterDatabaseView({
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {filteredCharacters.map((c) => {
               const assignedRooms = roomsByCharacter.get(c.id) ?? [];
+              let parsedOutfits: CharacterOutfit[] = [];
+              try {
+                parsedOutfits = JSON.parse(c.outfitsJson || '[]');
+              } catch {
+                parsedOutfits = [];
+              }
+              const activeOutfit = parsedOutfits.find((o) => o.id === c.activeOutfitId);
+              const displayAvatar = activeOutfit?.avatarUrl || c.avatarUrl;
 
               return (
                 <div
@@ -179,17 +191,23 @@ export function CharacterDatabaseView({
                         <CharacterAvatar
                           name={c.name}
                           avatarColor={c.avatarColor}
-                          avatarUrl={c.avatarUrl}
+                          avatarUrl={displayAvatar}
                           size="lg"
                         />
                         <div className="min-w-0">
                           <h3 className="truncate text-sm font-bold text-white">{c.name}</h3>
                           <p className="truncate text-xs text-indigo-300/90">{c.roleTitle}</p>
-                          <div className="mt-1 flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400 font-mono">
                             <span className="rounded bg-slate-800 px-1.5 py-0.5">{c.modelId}</span>
                             <span className="rounded bg-slate-800 px-1.5 py-0.5">
                               temp {c.temperature}
                             </span>
+                            {parsedOutfits.length > 0 && (
+                              <span className="inline-flex items-center gap-1 rounded bg-indigo-500/20 border border-indigo-500/40 px-1.5 py-0.5 text-indigo-300 font-sans">
+                                <Shirt className="h-2.5 w-2.5" />
+                                {parsedOutfits.length} outfit{parsedOutfits.length > 1 ? 's' : ''}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>

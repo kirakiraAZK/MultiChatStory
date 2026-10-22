@@ -1,11 +1,22 @@
 import { sqliteTable, text, integer, real, primaryKey, index } from 'drizzle-orm/sqlite-core';
 
+export interface CharacterOutfit {
+  id: string;
+  name: string;
+  avatarUrl?: string | null;
+  appearanceDescription: string;
+  behaviorModifier?: string;
+}
+
 export const characters = sqliteTable('characters', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   roleTitle: text('role_title').notNull().default('Character'),
   avatarColor: text('avatar_color').notNull().default('#6366f1'),
   avatarUrl: text('avatar_url'),
+  appearance: text('appearance').notNull().default(''),
+  outfitsJson: text('outfits_json').notNull().default('[]'),
+  activeOutfitId: text('active_outfit_id'),
   systemPrompt: text('system_prompt').notNull(),
   speakingStyle: text('speaking_style').notNull().default(''),
   overrideModelTuning: integer('override_model_tuning', { mode: 'boolean' }).notNull().default(false),
@@ -46,6 +57,7 @@ export const roomCharacters = sqliteTable(
     turnOrder: integer('turn_order').notNull(),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
     relationshipContext: text('relationship_context').notNull().default(''),
+    activeOutfitId: text('active_outfit_id'),
   },
   (table) => ({
     pk: primaryKey({ columns: [table.roomId, table.characterId] }),

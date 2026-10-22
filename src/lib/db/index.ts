@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { ulid } from 'ulid';
 import type {
   Character,
+  CharacterOutfit,
   Room,
   RoomCharacter,
   Message,
@@ -22,7 +23,7 @@ declare global {
   // eslint-disable-next-line no-var
   var __sqliteDb: DatabaseSync | undefined;
   // eslint-disable-next-line no-var
-  var __tavernMigratedV3: boolean | undefined;
+  var __tavernMigratedV4: boolean | undefined;
 }
 
 function ensureColumn(db: DatabaseSync, table: string, colName: string, colDef: string) {
@@ -43,11 +44,16 @@ function stripUndefined<T extends object>(obj: T): Partial<T> {
 }
 
 function runTavernMigrationsAndSeed(db: DatabaseSync) {
-  if (global.__tavernMigratedV3) return;
+  if (global.__tavernMigratedV4) return;
 
   // Migrate existing tables non-destructively
   ensureColumn(db, 'characters', 'avatar_url', 'TEXT');
+  ensureColumn(db, 'characters', 'appearance', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'characters', 'outfits_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, 'characters', 'active_outfit_id', 'TEXT');
   ensureColumn(db, 'characters', 'override_model_tuning', 'INTEGER NOT NULL DEFAULT 0');
+
+  ensureColumn(db, 'room_characters', 'active_outfit_id', 'TEXT');
 
   ensureColumn(db, 'rooms', 'memory_box', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'rooms', 'summary_model_id', "TEXT NOT NULL DEFAULT ''");
@@ -319,7 +325,7 @@ function runTavernMigrationsAndSeed(db: DatabaseSync) {
     `).run();
   }
 
-  global.__tavernMigratedV3 = true;
+  global.__tavernMigratedV4 = true;
 }
 
 function getRawDb(): DatabaseSync {
@@ -604,6 +610,36 @@ function initSchemaAndSeed(db: DatabaseSync) {
   }
 }
 
+export function parseCharacterOutfits(outfitsJson?: string | null): CharacterOutfit[] {
+  if (!outfitsJson) return [];
+  try {
+    const parsed = JSON.parse(outfitsJson);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function resolveCharacterOutfit(
+  character: Character,
+  roomOutfitId?: string | null
+): {
+  outfits: CharacterOutfit[];
+  activeOutfit: CharacterOutfit | null;
+  effectiveAvatarUrl: string | null;
+} {
+  const outfits = parseCharacterOutfits(character.outfitsJson);
+  const targetId = roomOutfitId !== undefined && roomOutfitId !== null
+    ? roomOutfitId
+    : character.activeOutfitId;
+  const activeOutfit =
+    (targetId ? outfits.find((o) => o.id === targetId) : null) ?? null;
+  const effectiveAvatarUrl =
+    activeOutfit?.avatarUrl || character.avatarUrl || null;
+
+  return { outfits, activeOutfit, effectiveAvatarUrl };
+}
+
 // Row mappers
 function mapCharacter(row: Record<string, unknown>): Character {
   return {
@@ -612,6 +648,9 @@ function mapCharacter(row: Record<string, unknown>): Character {
     roleTitle: String(row.role_title ?? 'Character'),
     avatarColor: String(row.avatar_color ?? '#6366f1'),
     avatarUrl: row.avatar_url ? String(row.avatar_url) : null,
+    appearance: String(row.appearance ?? ''),
+    outfitsJson: String(row.outfits_json ?? '[]'),
+    activeOutfitId: row.active_outfit_id ? String(row.active_outfit_id) : null,
     systemPrompt: String(row.system_prompt),
     speakingStyle: String(row.speaking_style ?? ''),
     overrideModelTuning: Boolean(row.override_model_tuning),
@@ -684,22 +723,32 @@ export function getCharacter(id: string): Character | null {
   return row ? mapCharacter(row) : null;
 }
 
-export function createCharacter(input: Omit<Character, 'id' | 'createdAt' | 'overrideModelTuning'> & { overrideModelTuning?: boolean }): Character {
+export function createCharacter(
+  input: Omit<Character, 'id' | 'createdAt' | 'overrideModelTuning' | 'appearance' | 'outfitsJson' | 'activeOutfitId'> & {
+    overrideModelTuning?: boolean;
+    appearance?: string;
+    outfitsJson?: string;
+    activeOutfitId?: string | null;
+  }
+): Character {
   const db = getRawDb();
   const id = `char_${ulid().toLowerCase()}`;
   const now = Date.now();
   db.prepare(`
     INSERT INTO characters (
-      id, name, role_title, avatar_color, avatar_url, system_prompt, speaking_style,
-      override_model_tuning, model_id, temperature, max_tokens, created_at
+      id, name, role_title, avatar_color, avatar_url, appearance, outfits_json, active_outfit_id,
+      system_prompt, speaking_style, override_model_tuning, model_id, temperature, max_tokens, created_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.name,
     input.roleTitle,
     input.avatarColor,
     input.avatarUrl ?? null,
+    input.appearance ?? '',
+    input.outfitsJson ?? '[]',
+    input.activeOutfitId ?? null,
     input.systemPrompt,
     input.speakingStyle,
     input.overrideModelTuning ? 1 : 0,
@@ -718,14 +767,19 @@ export function updateCharacter(id: string, input: Partial<Omit<Character, 'id' 
   const db = getRawDb();
   db.prepare(`
     UPDATE characters
-    SET name = ?, role_title = ?, avatar_color = ?, avatar_url = ?, system_prompt = ?,
-        speaking_style = ?, override_model_tuning = ?, model_id = ?, temperature = ?, max_tokens = ?
+    SET name = ?, role_title = ?, avatar_color = ?, avatar_url = ?,
+        appearance = ?, outfits_json = ?, active_outfit_id = ?,
+        system_prompt = ?, speaking_style = ?, override_model_tuning = ?,
+        model_id = ?, temperature = ?, max_tokens = ?
     WHERE id = ?
   `).run(
     updated.name,
     updated.roleTitle,
     updated.avatarColor,
     updated.avatarUrl ?? null,
+    updated.appearance ?? '',
+    updated.outfitsJson ?? '[]',
+    updated.activeOutfitId ?? null,
     updated.systemPrompt,
     updated.speakingStyle,
     updated.overrideModelTuning ? 1 : 0,
@@ -757,9 +811,10 @@ export function getRoomWithDetails(roomId: string): RoomWithDetails | null {
 
   const rosterRows = db
     .prepare(`
-      SELECT rc.room_id, rc.character_id, rc.turn_order, rc.is_active, rc.relationship_context,
+      SELECT rc.room_id, rc.character_id, rc.turn_order, rc.is_active, rc.relationship_context, rc.active_outfit_id,
              c.id as c_id, c.name as c_name, c.role_title as c_role_title, c.avatar_color as c_avatar_color,
-             c.avatar_url as c_avatar_url,
+             c.avatar_url as c_avatar_url, c.appearance as c_appearance, c.outfits_json as c_outfits_json,
+             c.active_outfit_id as c_active_outfit_id,
              c.system_prompt as c_system_prompt, c.speaking_style as c_speaking_style,
              c.override_model_tuning as c_override_model_tuning,
              c.model_id as c_model_id, c.temperature as c_temperature, c.max_tokens as c_max_tokens, c.created_at as c_created_at
@@ -776,12 +831,16 @@ export function getRoomWithDetails(roomId: string): RoomWithDetails | null {
     turnOrder: Number(r.turn_order),
     isActive: Boolean(r.is_active),
     relationshipContext: String(r.relationship_context ?? ''),
+    activeOutfitId: r.active_outfit_id ? String(r.active_outfit_id) : null,
     character: {
       id: String(r.c_id),
       name: String(r.c_name),
       roleTitle: String(r.c_role_title ?? 'Character'),
       avatarColor: String(r.c_avatar_color ?? '#6366f1'),
       avatarUrl: r.c_avatar_url ? String(r.c_avatar_url) : null,
+      appearance: String(r.c_appearance ?? ''),
+      outfitsJson: String(r.c_outfits_json ?? '[]'),
+      activeOutfitId: r.c_active_outfit_id ? String(r.c_active_outfit_id) : null,
       systemPrompt: String(r.c_system_prompt),
       speakingStyle: String(r.c_speaking_style ?? ''),
       overrideModelTuning: Boolean(r.c_override_model_tuning),
@@ -881,7 +940,12 @@ export function createRoom(input: {
 export function updateRoom(
   roomId: string,
   input: Partial<Omit<Room, 'id' | 'createdAt' | 'updatedAt'>> & {
-    roster?: Array<{ characterId: string; isActive?: boolean; relationshipContext?: string }>;
+    roster?: Array<{
+      characterId: string;
+      isActive?: boolean;
+      relationshipContext?: string;
+      activeOutfitId?: string | null;
+    }>;
   }
 ): RoomWithDetails | null {
   const existing = getRoomWithDetails(roomId);
@@ -916,13 +980,29 @@ export function updateRoom(
     );
 
     if (input.roster) {
+      const prevOutfitByChar = new Map<string, string | null>();
+      existing.roster.forEach((m) => {
+        prevOutfitByChar.set(m.characterId, m.activeOutfitId ?? null);
+      });
+
       db.prepare('DELETE FROM room_characters WHERE room_id = ?').run(roomId);
       const insertRoster = db.prepare(`
-        INSERT INTO room_characters (room_id, character_id, turn_order, is_active, relationship_context)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO room_characters (room_id, character_id, turn_order, is_active, relationship_context, active_outfit_id)
+        VALUES (?, ?, ?, ?, ?, ?)
       `);
       input.roster.forEach((item, idx) => {
-        insertRoster.run(roomId, item.characterId, idx, item.isActive === false ? 0 : 1, item.relationshipContext ?? '');
+        const resolvedOutfitId =
+          item.activeOutfitId !== undefined
+            ? item.activeOutfitId
+            : prevOutfitByChar.get(item.characterId) ?? null;
+        insertRoster.run(
+          roomId,
+          item.characterId,
+          idx,
+          item.isActive === false ? 0 : 1,
+          item.relationshipContext ?? '',
+          resolvedOutfitId
+        );
       });
     }
 
@@ -937,7 +1017,21 @@ export function updateRoom(
 
 export function deleteRoom(roomId: string): void {
   const db = getRawDb();
-  db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
+  db.exec('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    db.prepare(`
+      DELETE FROM message_versions
+      WHERE message_id IN (SELECT id FROM messages WHERE room_id = ?)
+    `).run(roomId);
+    db.prepare('DELETE FROM messages WHERE room_id = ?').run(roomId);
+    db.prepare('DELETE FROM room_characters WHERE room_id = ?').run(roomId);
+    db.prepare('DELETE FROM room_queue_states WHERE room_id = ?').run(roomId);
+    db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
 
 // ==================== MESSAGES, INLINE EDITS & REGENERATION ====================

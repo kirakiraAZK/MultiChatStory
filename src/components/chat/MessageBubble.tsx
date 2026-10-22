@@ -22,6 +22,7 @@ import { CharacterAvatar } from '../common/CharacterAvatar';
 interface MessageBubbleProps {
   message: MessageWithVersions;
   character?: Character;
+  knownCharacterNames?: string[];
   userAvatarUrl?: string | null;
   isLatestMessage: boolean;
   isStreamingThisMessage: boolean;
@@ -36,7 +37,41 @@ interface MessageBubbleProps {
   onDelete: (messageId: string) => void;
 }
 
-function renderFormattedDialogue(text: string) {
+function renderMentionsInSegment(segment: string, knownNames: string[], keyPrefix: string) {
+  if (!segment.includes('@')) return segment;
+
+  const escapedNames = knownNames
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .flatMap((name) => {
+      const full = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const under = name.replace(/\s+/g, '_').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const first = name.split(/\s+/)[0]?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return first && first.length >= 2 ? [full, under, first] : [full, under];
+    });
+
+  const mentionPattern =
+    escapedNames.length > 0
+      ? new RegExp(`(@(?:${escapedNames.join('|')})(?![a-zA-Z0-9_])|@[a-zA-Z0-9_]+)`, 'gi')
+      : /(@[a-zA-Z0-9_]+)/g;
+
+  const subParts = segment.split(mentionPattern);
+  return subParts.map((sub, i) => {
+    if (sub.startsWith('@') && sub.length > 1) {
+      return (
+        <span
+          key={`${keyPrefix}-m-${i}`}
+          className="inline-flex items-center rounded-md bg-indigo-500/25 border border-indigo-400/40 px-1.5 py-0.5 text-xs font-semibold text-indigo-200 mx-0.5"
+        >
+          {sub}
+        </span>
+      );
+    }
+    return <React.Fragment key={`${keyPrefix}-t-${i}`}>{sub}</React.Fragment>;
+  });
+}
+
+function renderFormattedDialogue(text: string, knownCharacterNames: string[] = []) {
   if (!text) return null;
   // Split by *action* blocks so physical stage actions are styled distinctly from spoken dialogue
   const parts = text.split(/(\*[^*]+\*)/g);
@@ -48,13 +83,18 @@ function renderFormattedDialogue(text: string) {
         </span>
       );
     }
-    return <span key={idx}>{part}</span>;
+    return (
+      <span key={idx}>
+        {renderMentionsInSegment(part, knownCharacterNames, String(idx))}
+      </span>
+    );
   });
 }
 
 export function MessageBubble({
   message,
   character,
+  knownCharacterNames = [],
   userAvatarUrl,
   isLatestMessage,
   isStreamingThisMessage,
@@ -339,7 +379,7 @@ export function MessageBubble({
       ) : (
         <div className="pl-10 text-sm leading-relaxed text-slate-200 whitespace-pre-wrap">
           {displayedContent ? (
-            renderFormattedDialogue(displayedContent)
+            renderFormattedDialogue(displayedContent, knownCharacterNames)
           ) : isStreamingThisMessage ? (
             <span className="italic text-slate-500">Assembling response...</span>
           ) : null}

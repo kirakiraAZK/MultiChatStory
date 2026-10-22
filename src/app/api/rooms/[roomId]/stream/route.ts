@@ -8,7 +8,10 @@ import {
   updateRoomQueueState,
 } from '@/lib/db';
 import { buildMultiCharacterPayload } from '@/lib/ai/context-assembler';
-import { resolveNextCharacterId } from '@/lib/ai/turn-scheduler';
+import {
+  resolveNextCharacterId,
+  extractMentionedCharacterIds,
+} from '@/lib/ai/turn-scheduler';
 import {
   registerRoomAbortController,
   clearRoomAbortController,
@@ -196,15 +199,48 @@ export async function POST(
             ? latestRoom?.queueState.consecutiveAutoTurns ?? 0
             : (latestRoom?.queueState.consecutiveAutoTurns ?? 0) + 1;
 
-          const nextCharId = resolveNextCharacterId(roomId, {
-            excludeCharacterId: assembled.targetCharacter.id,
-          });
+          // Check existing mention queue + any new @mentions made by this AI character
+          let existingQueue: string[] = [];
+          try {
+            existingQueue = JSON.parse(
+              latestRoom?.queueState.queuedCharacterIdsJson || '[]'
+            );
+          } catch {
+            existingQueue = [];
+          }
+          const filteredQueue = existingQueue.filter(
+            (id) => id !== assembled.targetCharacter.id
+          );
+
+          const aiMentionedIds = latestRoom
+            ? extractMentionedCharacterIds(
+                finalText,
+                latestRoom.roster,
+                assembled.targetCharacter.id
+              )
+            : [];
+
+          const combinedMentionQueue = Array.from(
+            new Set([...filteredQueue, ...aiMentionedIds])
+          );
+
+          const hasPendingMentionTurn = combinedMentionQueue.length > 0;
+          const nextCharId = hasPendingMentionTurn
+            ? combinedMentionQueue[0]
+            : resolveNextCharacterId(roomId, {
+                excludeCharacterId: assembled.targetCharacter.id,
+              });
+
+          const nextQueueAfterPop = hasPendingMentionTurn
+            ? combinedMentionQueue.slice(1)
+            : [];
 
           updateRoomQueueState(roomId, {
             executionState: 'COOLDOWN',
             activeCharacterId: null,
             nextCharacterId: nextCharId,
             consecutiveAutoTurns: nextAutoTurns,
+            queuedCharacterIdsJson: JSON.stringify(nextQueueAfterPop),
           });
 
           controller.enqueue(
@@ -213,6 +249,8 @@ export async function POST(
               message: finalized,
               nextCharacterId: nextCharId,
               consecutiveAutoTurns: nextAutoTurns,
+              hasPendingMentionTurn,
+              aiMentionedCharacterIds: aiMentionedIds,
             })
           );
         }

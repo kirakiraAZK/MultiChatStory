@@ -16,12 +16,13 @@ import {
   MessageCircle,
   Brain,
   BookOpen,
+  Shirt,
 } from 'lucide-react';
 import { CharacterAvatar } from '../common/CharacterAvatar';
 import { CharacterEditorModal } from '../modals/CharacterEditorModal';
 import type { TavernSettingsTab } from '../modals/TavernSettingsModal';
 import type { RoomRosterMember } from '@/lib/db';
-import type { Character, Room } from '@/lib/db/schema';
+import type { Character, CharacterOutfit, Room } from '@/lib/db/schema';
 
 interface RosterSidebarProps {
   room: Room;
@@ -34,7 +35,12 @@ interface RosterSidebarProps {
   onTriggerCharacter: (characterId: string, directAddressTo?: string) => void;
   onUpdateRoomSettings: (
     patch: Partial<Room> & {
-      roster?: Array<{ characterId: string; isActive?: boolean; relationshipContext?: string }>;
+      roster?: Array<{
+        characterId: string;
+        isActive?: boolean;
+        relationshipContext?: string;
+        activeOutfitId?: string | null;
+      }>;
     }
   ) => Promise<void>;
   onCreateCharacter: (input: Omit<Character, 'id' | 'createdAt'>) => Promise<Character>;
@@ -84,6 +90,20 @@ export function RosterSidebar({
       characterId: r.characterId,
       isActive: r.characterId === characterId ? !currentActive : r.isActive,
       relationshipContext: r.relationshipContext,
+      activeOutfitId: r.activeOutfitId ?? null,
+    }));
+    await onUpdateRoomSettings({ roster: nextRoster });
+  };
+
+  const handleSwitchCharacterRoomOutfit = async (
+    characterId: string,
+    outfitId: string | null
+  ) => {
+    const nextRoster = roster.map((r) => ({
+      characterId: r.characterId,
+      isActive: r.isActive,
+      relationshipContext: r.relationshipContext,
+      activeOutfitId: r.characterId === characterId ? outfitId : r.activeOutfitId ?? null,
     }));
     await onUpdateRoomSettings({ roster: nextRoster });
   };
@@ -206,6 +226,19 @@ export function RosterSidebar({
           const isSpeakingNow = activeCharacterId === c.id && isStreaming;
           const isQueuedNext = nextCharacterId === c.id && !isStreaming;
 
+          let parsedOutfits: CharacterOutfit[] = [];
+          try {
+            parsedOutfits = JSON.parse(c.outfitsJson || '[]');
+          } catch {
+            parsedOutfits = [];
+          }
+          const currentOutfitId =
+            member.activeOutfitId !== null && member.activeOutfitId !== undefined
+              ? member.activeOutfitId
+              : c.activeOutfitId ?? '';
+          const equippedOutfit = parsedOutfits.find((o) => o.id === currentOutfitId) ?? null;
+          const effectiveAvatarUrl = equippedOutfit?.avatarUrl || c.avatarUrl;
+
           const targetOptions = [
             { label: 'The Room (Open response)', value: '' },
             { label: `${activeUserDisplayName} (You)`, value: activeUserDisplayName },
@@ -239,7 +272,7 @@ export function RosterSidebar({
                     <CharacterAvatar
                       name={c.name}
                       avatarColor={c.avatarColor}
-                      avatarUrl={c.avatarUrl}
+                      avatarUrl={effectiveAvatarUrl}
                       size="md"
                     />
                     <span className="absolute -bottom-1 -right-1 rounded bg-slate-950/90 border border-slate-700 px-1 text-[9px] font-mono font-bold text-slate-300">
@@ -290,7 +323,7 @@ export function RosterSidebar({
                       setEditingCharacter(c);
                       setIsEditorModalOpen(true);
                     }}
-                    title="Edit character persona & picture"
+                    title="Edit character persona, outfits & picture"
                     className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white cursor-pointer"
                   >
                     <Pencil className="h-3.5 w-3.5" />
@@ -325,6 +358,34 @@ export function RosterSidebar({
                   )}
                 </div>
               </div>
+
+              {/* Wardrobe / Active Outfit Switcher (Mid-Chat Costume Switch) */}
+              {parsedOutfits.length > 0 && (
+                <div className="mt-2 rounded-lg border border-indigo-500/30 bg-indigo-950/20 p-1.5 flex items-center gap-1.5 text-[11px]">
+                  <Shirt className="h-3 w-3 text-indigo-400 shrink-0 ml-0.5" />
+                  <span className="text-slate-400 shrink-0">Outfit:</span>
+                  <select
+                    value={currentOutfitId}
+                    onChange={(e) =>
+                      handleSwitchCharacterRoomOutfit(c.id, e.target.value || null)
+                    }
+                    className="w-full truncate bg-transparent font-medium text-indigo-200 focus:outline-none cursor-pointer"
+                    title={
+                      equippedOutfit?.appearanceDescription ||
+                      'Switch character outfit & portrait in this room'
+                    }
+                  >
+                    <option value="" className="bg-slate-900 text-slate-300">
+                      Base Appearance (No Outfit)
+                    </option>
+                    {parsedOutfits.map((o) => (
+                      <option key={o.id} value={o.id} className="bg-slate-900 text-white">
+                        {o.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Target Selection: "Who to Ask / Address" */}
               <div className="mt-2.5 rounded-lg border border-slate-800/80 bg-slate-950/70 p-1.5 flex items-center gap-1.5 text-[11px]">
