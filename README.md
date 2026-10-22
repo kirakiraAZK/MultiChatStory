@@ -5,6 +5,46 @@
 
 ---
 
+## 🏛️ System Architecture
+
+```mermaid
+flowchart TD
+    subgraph Client["Frontend Client (Next.js 15 App Router / React)"]
+        UI["Chatroom Workspace & Transcript"]
+        Bar["Orchestrator Bar (Auto-Chat / Cooldown / Abort)"]
+        Composer["Composer (@Mentions & Quick Responses)"]
+        Roster["Roster Sidebar (Turn Order & Mid-Chat Outfit Switcher)"]
+        Modal["Tavern Chat Settings (7 Tabs)"]
+    end
+
+    subgraph Server["Next.js Server & Engine"]
+        APIRoute["API Routes (/api/rooms, /stream, /quick-responses)"]
+        Scheduler["Turn Scheduler (@Mention Priority & Queue)"]
+        Assembler["Context Assembler (Perspective Isolation & Wardrobe)"]
+        StreamMgr["Stream Manager (SSE & AbortController Registry)"]
+    end
+
+    subgraph Storage["Localhost Persistence & AI"]
+        SQLite[("Node.js native SQLite (multichat.db)")]
+        Disk["/public/uploads/avatars/ (Portraits)"]
+        LLM["OpenAI / OpenRouter / Ollama / LM Studio API"]
+    end
+
+    Composer -->|User message / @mention| APIRoute
+    Bar -->|Dispatch / Abort Signal| StreamMgr
+    Roster -->|Switch Outfit / Reorder| APIRoute
+    Modal -->|Update Prompts / Personas / Lore| APIRoute
+    APIRoute --> Scheduler
+    Scheduler --> Assembler
+    Assembler --> StreamMgr
+    StreamMgr -->|Real-time Token Stream SSE| UI
+    StreamMgr -->|Prompt Payload| LLM
+    APIRoute <-->|Read / Write State| SQLite
+    APIRoute <-->|Upload / Serve Images| Disk
+```
+
+---
+
 ## 🌟 Key Features
 
 ### 1. Multi-Character AI Chatrooms
@@ -19,6 +59,31 @@
 * **Countdown Buffer & Cooldown**: Visual countdown buffer before each turn dispatch, giving you time to read, pause, or intervene.
 * **Configurable Loop Cap**: Set maximum consecutive auto-turns (e.g., 8 turns) to prevent runaway token usage.
 * **Real-Time Stream Interruption**: Instant **Pause**, **Resume**, and **Stop & Abort** buttons leveraging native `AbortController` over Server-Sent Events (SSE).
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+
+    IDLE --> QUEUED : User sends message / Clicks "Step Turn" / Auto-Chat triggers
+    IDLE --> QUEUED : Explicit @Character mention in chat
+
+    QUEUED --> STREAMING : POST /api/rooms/:id/stream starts SSE
+
+    STREAMING --> STREAMING : Real-time token deltas received
+    STREAMING --> PAUSED : User clicks "Stop & Abort" (AbortController triggered)
+    PAUSED --> IDLE : User resumes or edits transcript
+
+    STREAMING --> COOLDOWN : Stream completes (Event: done)
+
+    state COOLDOWN {
+        [*] --> TimerRunning
+        TimerRunning --> SkipTrigger : User clicks "Skip Cooldown"
+        TimerRunning --> TurnDispatched : Cooldown countdown reaches 0s
+    }
+
+    COOLDOWN --> QUEUED : Next turn in queue (or next @mentioned character)
+    COOLDOWN --> IDLE : Max auto-turns reached OR @mention chain finished
+```
 
 ### 3. `@character` Mention System
 * **Targeted Invocation**: Type `@` or click a character's mention pill (e.g., `@Sarah Chen` or `@Elria`) to trigger **only** that character to speak.
@@ -156,6 +221,37 @@ Click **Tavern Chat Settings** at the bottom of the left sidebar to access:
 
 ## 🏗️ Technical Architecture
 
+### Context Assembly & Wardrobe Injection Pipeline
+```mermaid
+flowchart LR
+    subgraph Inputs["Room & Tavern Settings Context"]
+        SP["System Prompt Directive ({{char}}, {{user}})"]
+        SC["Scenario & Setting Prompt"]
+        MEM["Universal Memory Box / Story Summary"]
+        LB["Active Lorebooks (Keyword-Triggered)"]
+        USER["Active User Persona ({{user}} Profile)"]
+    end
+
+    subgraph Target["Speaking Character Context"]
+        CHAR["Character Persona & Bio"]
+        STYLE["Speaking Style & Cadence"]
+        APP["Base Physical Appearance"]
+        OUTFIT["Active Equipped Outfit / Costume"]
+    end
+
+    subgraph Output["OpenAI API Message Payload"]
+        SYS["system: Persona, Equipped Clothes & Strict Multi-Agent Rules"]
+        HIST["user: Prior transcript remapped to target perspective"]
+        ANCHOR["system: Immediate turn anchor & @mention directive"]
+    end
+
+    SP & SC & MEM & LB & USER --> SYS
+    CHAR & STYLE & APP & OUTFIT --> SYS
+    HIST --> Output
+    ANCHOR --> Output
+```
+
+### Folder & Codebase Structure
 ```
 MultiChatStudio/
 ├── src/
