@@ -18,6 +18,15 @@ import {
   RotateCcw,
   Pencil,
   X,
+  MapPin,
+  Clock,
+  Sun,
+  Sunrise,
+  Sunset,
+  Moon,
+  Image as ImageIcon,
+  Upload,
+  Plus,
 } from 'lucide-react';
 import { useRoomOrchestrator } from '@/store/useRoomOrchestrator';
 import { MessageBubble } from './MessageBubble';
@@ -35,7 +44,22 @@ import type {
   LlmSettings,
   UserPersona,
   SystemPromptPreset,
+  RoomSubPlace,
+  TimeOfDay,
 } from '@/lib/db/schema';
+
+const TIME_OF_DAY_OPTIONS: Array<{
+  id: TimeOfDay;
+  label: string;
+  shortDesc: string;
+}> = [
+  { id: 'dawn', label: 'Dawn', shortDesc: 'Early sunrise twilight' },
+  { id: 'morning', label: 'Morning', shortDesc: 'Bright morning daylight' },
+  { id: 'noon', label: 'Noon', shortDesc: 'High midday sun' },
+  { id: 'sunset', label: 'Sunset', shortDesc: 'Golden hour dusk' },
+  { id: 'night', label: 'Night', shortDesc: 'Evening & moonlight' },
+  { id: 'midnight', label: 'Midnight', shortDesc: 'Late night shadows' },
+];
 
 interface RoomApiPayload extends RoomWithDetails {
   messages: MessageWithVersions[];
@@ -66,6 +90,16 @@ export function ChatroomWorkspace() {
   const [isQuickResponsesOpen, setIsQuickResponsesOpen] = useState(false);
   const [quickResponses, setQuickResponses] = useState<string[]>([]);
   const [isLoadingQuickResponses, setIsLoadingQuickResponses] = useState(false);
+
+  // Place / Sub-Place & Dynamic Background state
+  const [isGeneratingBg, setIsGeneratingBg] = useState(false);
+  const [isAddSubPlaceOpen, setIsAddSubPlaceOpen] = useState(false);
+  const [newParentPlaceInput, setNewParentPlaceInput] = useState('');
+  const [newSubPlaceNameInput, setNewSubPlaceNameInput] = useState('');
+  const [newSubPlaceDescInput, setNewSubPlaceDescInput] = useState('');
+  const [environmentToast, setEnvironmentToast] = useState<string | null>(null);
+  const bgUploadInputRef = useRef<HTMLInputElement>(null);
+  const inFlightBgKeysRef = useRef<Set<string>>(new Set());
 
   // @Mention Chain state refs
   const isMentionTurnActiveRef = useRef(false);
@@ -442,6 +476,20 @@ export function ChatroomWorkspace() {
         ? data.mentionedCharacterIds
         : [];
 
+      if (data.environmentTransition?.changed) {
+        const tr = data.environmentTransition;
+        const locLabel = tr.subPlace
+          ? `${tr.placeName} › ${tr.subPlace.name}`
+          : tr.placeName;
+        setEnvironmentToast(
+          `Scene updated from narration: ${locLabel} • ${String(tr.timeOfDay).toUpperCase()}${
+            tr.customTimeLabel ? ` (${tr.customTimeLabel})` : ''
+          }`
+        );
+        setTimeout(() => setEnvironmentToast(null), 5000);
+        await queryClient.invalidateQueries({ queryKey: ['rooms'] });
+      }
+
       setConsecutiveAutoTurns(0);
       if (data.nextCharacterId) {
         setNextCharacterId(data.nextCharacterId);
@@ -664,6 +712,185 @@ export function ChatroomWorkspace() {
   const activeRosterMembers = activeRoomData?.roster.filter((r) => r.isActive) ?? [];
   const knownCharacterNames = Array.from(characterMap.values()).map((c) => c.name);
 
+  // Resolve current Place, Sub-Place, Time of Day & Cached Background
+  let roomSubPlaces: RoomSubPlace[] = [];
+  try {
+    roomSubPlaces = JSON.parse(activeRoomData?.room.subPlacesJson || '[]');
+    if (!Array.isArray(roomSubPlaces)) roomSubPlaces = [];
+  } catch {
+    roomSubPlaces = [];
+  }
+  const activeSubPlace =
+    (activeRoomData?.room.currentSubPlaceId
+      ? roomSubPlaces.find((sp) => sp.id === activeRoomData.room.currentSubPlaceId)
+      : roomSubPlaces[0]) ??
+    roomSubPlaces[0] ??
+    null;
+  const activePlaceName =
+    activeSubPlace?.parentPlaceName ||
+    activeRoomData?.room.currentPlaceName ||
+    'Main Location';
+  const activeTimeOfDay: TimeOfDay = activeRoomData?.room.currentTimeOfDay || 'night';
+  const activeCustomTimeLabel = activeRoomData?.room.customTimeLabel || '';
+  const activeBackgroundUrl =
+    activeSubPlace?.backgroundsByTime?.[activeTimeOfDay] ?? null;
+
+  // Group sub-places by parentPlaceName for clean dropdown optgroups
+  const subPlacesByParent = new Map<string, RoomSubPlace[]>();
+  for (const sp of roomSubPlaces) {
+    const pName = sp.parentPlaceName || activeRoomData?.room.currentPlaceName || 'Main Location';
+    const list = subPlacesByParent.get(pName) ?? [];
+    list.push(sp);
+    subPlacesByParent.set(pName, list);
+  }
+
+  const triggerBackgroundGeneration = useCallback(
+    async (opts?: {
+      subPlaceId?: string;
+      timeOfDay?: TimeOfDay;
+      forceRegenerate?: boolean;
+      customImageUrl?: string;
+    }) => {
+      if (!selectedRoomId) return;
+      const targetSubId = opts?.subPlaceId || activeSubPlace?.id;
+      const targetTime = opts?.timeOfDay || activeTimeOfDay;
+      if (!targetSubId) return;
+
+      const cacheKey = `${selectedRoomId}_${targetSubId}_${targetTime}`;
+      if (!opts?.forceRegenerate && opts?.customImageUrl === undefined) {
+        if (inFlightBgKeysRef.current.has(cacheKey)) return;
+      }
+
+      inFlightBgKeysRef.current.add(cacheKey);
+      setIsGeneratingBg(true);
+      try {
+        const res = await fetch(`/api/rooms/${selectedRoomId}/background`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subPlaceId: targetSubId,
+            timeOfDay: targetTime,
+            forceRegenerate: Boolean(opts?.forceRegenerate),
+            customImageUrl: opts?.customImageUrl,
+          }),
+        });
+        if (res.ok) {
+          await queryClient.invalidateQueries({ queryKey: ['room', selectedRoomId] });
+          await queryClient.invalidateQueries({ queryKey: ['rooms'] });
+        }
+      } finally {
+        inFlightBgKeysRef.current.delete(cacheKey);
+        setIsGeneratingBg(false);
+      }
+    },
+    [selectedRoomId, activeSubPlace?.id, activeTimeOfDay, queryClient]
+  );
+
+  // Auto-generate background ONCE per (subPlace, timeOfDay) if not yet cached
+  useEffect(() => {
+    if (!selectedRoomId || !activeSubPlace) return;
+    const autoGenEnabled = tavernData?.settings.autoGenerateBackgrounds ?? true;
+    const provider = tavernData?.settings.imageProvider ?? 'pollinations';
+    if (!autoGenEnabled || provider === 'manual_only') return;
+
+    const alreadyCached = Boolean(activeSubPlace.backgroundsByTime?.[activeTimeOfDay]);
+    if (!alreadyCached) {
+      triggerBackgroundGeneration({
+        subPlaceId: activeSubPlace.id,
+        timeOfDay: activeTimeOfDay,
+        forceRegenerate: false,
+      });
+    }
+  }, [
+    selectedRoomId,
+    activeSubPlace,
+    activeTimeOfDay,
+    tavernData?.settings.autoGenerateBackgrounds,
+    tavernData?.settings.imageProvider,
+    triggerBackgroundGeneration,
+  ]);
+
+  const handleSelectSubPlace = async (subPlaceId: string) => {
+    if (!selectedRoomId) return;
+    const targetSp = roomSubPlaces.find((sp) => sp.id === subPlaceId);
+    if (!targetSp) return;
+    await fetch(`/api/rooms/${selectedRoomId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        currentSubPlaceId: targetSp.id,
+        currentPlaceName: targetSp.parentPlaceName || activePlaceName,
+      }),
+    });
+    await queryClient.invalidateQueries({ queryKey: ['room', selectedRoomId] });
+    await queryClient.invalidateQueries({ queryKey: ['rooms'] });
+  };
+
+  const handleSelectTimeOfDay = async (newTime: TimeOfDay) => {
+    if (!selectedRoomId) return;
+    await fetch(`/api/rooms/${selectedRoomId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        currentTimeOfDay: newTime,
+      }),
+    });
+    await queryClient.invalidateQueries({ queryKey: ['room', selectedRoomId] });
+    await queryClient.invalidateQueries({ queryKey: ['rooms'] });
+  };
+
+  const handleCreateQuickSubPlace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedRoomId || !newSubPlaceNameInput.trim()) return;
+    const parentPlace = newParentPlaceInput.trim() || activePlaceName;
+    const newSp: RoomSubPlace = {
+      id: `subplace_${Date.now().toString(36)}`,
+      name: newSubPlaceNameInput.trim(),
+      parentPlaceName: parentPlace,
+      description:
+        newSubPlaceDescInput.trim() ||
+        `${newSubPlaceNameInput.trim()} inside ${parentPlace}.`,
+      backgroundsByTime: {},
+    };
+    const updatedList = [...roomSubPlaces, newSp];
+    await fetch(`/api/rooms/${selectedRoomId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        currentPlaceName: parentPlace,
+        currentSubPlaceId: newSp.id,
+        subPlacesJson: JSON.stringify(updatedList),
+      }),
+    });
+    setNewSubPlaceNameInput('');
+    setNewSubPlaceDescInput('');
+    setIsAddSubPlaceOpen(false);
+    await queryClient.invalidateQueries({ queryKey: ['room', selectedRoomId] });
+    await queryClient.invalidateQueries({ queryKey: ['rooms'] });
+  };
+
+  const handleUploadCustomBackground = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedRoomId || !activeSubPlace) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/uploads/avatar', {
+      method: 'POST',
+      body: formData,
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.url) {
+        await triggerBackgroundGeneration({
+          subPlaceId: activeSubPlace.id,
+          timeOfDay: activeTimeOfDay,
+          customImageUrl: data.url,
+        });
+      }
+    }
+    e.target.value = '';
+  };
+
   // Detect trailing @mention query in userMessageInput for live autocomplete
   const mentionQueryMatch = userMessageInput.match(/(?:^|\s)@([^\s@]*)$/);
   const mentionQuery = mentionQueryMatch ? mentionQueryMatch[1].toLowerCase() : null;
@@ -829,7 +1056,7 @@ export function ChatroomWorkspace() {
               Tavern Chat Settings
             </span>
             <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] text-indigo-300">
-              7 Tabs
+              8 Tabs
             </span>
           </button>
         </div>
@@ -888,6 +1115,16 @@ export function ChatroomWorkspace() {
 
                 <button
                   type="button"
+                  onClick={() => openTavernSettings('places_time')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-2.5 py-1 text-emerald-200 hover:border-emerald-400 hover:text-white cursor-pointer"
+                  title="Manage Places, Sub-Places, Time of Day & Background AI Settings"
+                >
+                  <MapPin className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Places & Time</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => openTavernSettings('scenario')}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/50 bg-indigo-600/20 px-3 py-1 font-semibold text-indigo-200 hover:bg-indigo-600/30 cursor-pointer"
                 >
@@ -906,6 +1143,239 @@ export function ChatroomWorkspace() {
                 </button>
               </div>
             </header>
+
+            {/* Scene Environment Bar: Place / Sub-Place, Time of Day & One-Time Cached Background Controls */}
+            <div className="relative flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-900/90 px-6 py-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Two-Step Place & Sub-Place Selector */}
+                <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/25 px-2.5 py-1">
+                  <MapPin className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                  <span className="text-[11px] font-semibold text-emerald-300">
+                    Place:
+                  </span>
+                  <select
+                    value={activePlaceName}
+                    onChange={(e) => {
+                      const chosenPlace = e.target.value;
+                      const firstSubInPlace =
+                        subPlacesByParent.get(chosenPlace)?.[0] ?? roomSubPlaces[0];
+                      if (firstSubInPlace) {
+                        handleSelectSubPlace(firstSubInPlace.id);
+                      }
+                    }}
+                    className="bg-slate-900 text-xs font-bold text-emerald-200 rounded px-2 py-0.5 border border-slate-700/80 focus:border-emerald-500 focus:outline-none cursor-pointer"
+                    title="Select Main Place (Building / Location)"
+                  >
+                    {Array.from(subPlacesByParent.keys()).map((parentName) => (
+                      <option key={parentName} value={parentName}>
+                        📍 {parentName}
+                      </option>
+                    ))}
+                  </select>
+
+                  <span className="text-slate-500 font-bold">›</span>
+
+                  <span className="text-[11px] font-semibold text-slate-300">
+                    Sub-Place:
+                  </span>
+                  <select
+                    value={activeSubPlace?.id ?? ''}
+                    onChange={(e) => handleSelectSubPlace(e.target.value)}
+                    className="bg-slate-900 text-xs font-semibold text-white rounded px-2 py-0.5 border border-slate-700/80 focus:border-emerald-500 focus:outline-none cursor-pointer"
+                    title="Select Sub-Place (Room / Area inside the selected Place)"
+                  >
+                    {(subPlacesByParent.get(activePlaceName) ?? roomSubPlaces).map((sp) => (
+                      <option key={sp.id} value={sp.id}>
+                        {sp.name}
+                      </option>
+                    ))}
+                  </select>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewParentPlaceInput(activePlaceName);
+                      setIsAddSubPlaceOpen((v) => !v);
+                    }}
+                    className="inline-flex items-center gap-0.5 rounded bg-emerald-600/30 px-2 py-0.5 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-600/50 cursor-pointer transition"
+                    title="Quickly add a new Main Place or Sub-Place"
+                  >
+                    <Plus className="h-3 w-3" />
+                    Add Place / Sub-Place
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => openTavernSettings('places_time')}
+                    className="inline-flex items-center gap-0.5 rounded border border-emerald-500/30 bg-slate-900/90 px-2 py-0.5 text-[10px] font-medium text-slate-300 hover:text-white cursor-pointer transition"
+                    title="Open full Places & Time Manager"
+                  >
+                    Manage
+                  </button>
+                </div>
+
+                {/* Time of Day Selector Pills */}
+                <div className="flex items-center gap-1 rounded-lg border border-amber-500/35 bg-amber-950/20 px-2 py-1">
+                  <Clock className="h-3.5 w-3.5 text-amber-400 shrink-0 mr-0.5" />
+                  {TIME_OF_DAY_OPTIONS.map((t) => {
+                    const isSelected = activeTimeOfDay === t.id;
+                    const isCachedForThisTime = Boolean(
+                      activeSubPlace?.backgroundsByTime?.[t.id]
+                    );
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => handleSelectTimeOfDay(t.id)}
+                        className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-semibold transition cursor-pointer ${
+                          isSelected
+                            ? 'bg-amber-500 text-slate-950 shadow-sm'
+                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                        }`}
+                        title={`${t.label}: ${t.shortDesc}${
+                          isCachedForThisTime ? ' (Background Cached ✓)' : ''
+                        }`}
+                      >
+                        {t.id === 'dawn' && <Sunrise className="h-3 w-3" />}
+                        {(t.id === 'morning' || t.id === 'noon') && (
+                          <Sun className="h-3 w-3" />
+                        )}
+                        {t.id === 'sunset' && <Sunset className="h-3 w-3" />}
+                        {(t.id === 'night' || t.id === 'midnight') && (
+                          <Moon className="h-3 w-3" />
+                        )}
+                        <span>{t.label}</span>
+                        {isCachedForThisTime && !isSelected && (
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                        )}
+                      </button>
+                    );
+                  })}
+                  {activeCustomTimeLabel && (
+                    <span className="ml-1 rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-amber-300">
+                      {activeCustomTimeLabel}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Dynamic Cached Background Controls */}
+              <div className="flex items-center gap-1.5">
+                <input
+                  ref={bgUploadInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleUploadCustomBackground}
+                  className="hidden"
+                />
+                <span className="inline-flex items-center gap-1 text-[11px] text-slate-400">
+                  <ImageIcon className="h-3.5 w-3.5 text-indigo-400" />
+                  {isGeneratingBg ? (
+                    <span className="text-amber-300 animate-pulse font-medium">
+                      Generating scene BG...
+                    </span>
+                  ) : activeBackgroundUrl ? (
+                    <span className="text-emerald-400 font-medium">
+                      BG Cached ({activeSubPlace?.name} • {activeTimeOfDay})
+                    </span>
+                  ) : (
+                    <span className="text-slate-500">No BG cached</span>
+                  )}
+                </span>
+
+                <button
+                  type="button"
+                  disabled={isGeneratingBg || !activeSubPlace}
+                  onClick={() =>
+                    triggerBackgroundGeneration({
+                      subPlaceId: activeSubPlace?.id,
+                      timeOfDay: activeTimeOfDay,
+                      forceRegenerate: true,
+                    })
+                  }
+                  className="inline-flex items-center gap-1 rounded-lg border border-indigo-500/40 bg-indigo-950/40 px-2 py-1 text-[11px] font-semibold text-indigo-200 hover:bg-indigo-900/60 disabled:opacity-40 cursor-pointer transition"
+                  title="Generate (or regenerate) AI background for this Sub-Place & Time of Day"
+                >
+                  <RotateCcw className={`h-3 w-3 ${isGeneratingBg ? 'animate-spin' : ''}`} />
+                  {activeBackgroundUrl ? 'Regen BG' : 'Gen BG'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => bgUploadInputRef.current?.click()}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2 py-1 text-[11px] font-semibold text-slate-200 hover:bg-slate-700 cursor-pointer transition"
+                  title="Upload custom background image for this Sub-Place & Time of Day"
+                >
+                  <Upload className="h-3 w-3" />
+                  Upload
+                </button>
+              </div>
+
+              {/* Inline Add Place / Sub-Place Popover */}
+              {isAddSubPlaceOpen && (
+                <form
+                  onSubmit={handleCreateQuickSubPlace}
+                  className="mt-2 flex w-full flex-wrap items-center gap-2 rounded-xl border border-emerald-500/40 bg-slate-950 p-2.5 shadow-xl"
+                >
+                  <span className="text-[11px] font-semibold text-emerald-300">
+                    New Place / Sub-Place:
+                  </span>
+                  <input
+                    type="text"
+                    value={newParentPlaceInput}
+                    onChange={(e) => setNewParentPlaceInput(e.target.value)}
+                    placeholder="Main Place (e.g., Home, School, Park)"
+                    className="w-44 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+                  />
+                  <span className="text-slate-500">›</span>
+                  <input
+                    type="text"
+                    required
+                    value={newSubPlaceNameInput}
+                    onChange={(e) => setNewSubPlaceNameInput(e.target.value)}
+                    placeholder="Sub-Place (e.g., Living Room, Bedroom, Kitchen)"
+                    className="w-52 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+                  />
+                  <input
+                    type="text"
+                    value={newSubPlaceDescInput}
+                    onChange={(e) => setNewSubPlaceDescInput(e.target.value)}
+                    placeholder="Visual description for AI & background generation..."
+                    className="flex-1 min-w-[200px] rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+                  />
+                  <button
+                    type="submit"
+                    className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-500 cursor-pointer"
+                  >
+                    Create & Switch
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsAddSubPlaceOpen(false)}
+                    className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </form>
+              )}
+
+              {/* Narration Environment Transition Toast */}
+              {environmentToast && (
+                <div className="mt-1.5 flex w-full items-center justify-between rounded-lg border border-emerald-500/40 bg-emerald-950/50 px-3 py-1 text-[11px] text-emerald-200">
+                  <span className="flex items-center gap-1.5">
+                    <Sparkles className="h-3.5 w-3.5 text-emerald-400" />
+                    {environmentToast}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setEnvironmentToast(null)}
+                    className="text-emerald-300 hover:text-white cursor-pointer"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+            </div>
 
             {/* Real-Time Turn & Stream Orchestrator Bar */}
             <OrchestratorBar
@@ -928,8 +1398,22 @@ export function ChatroomWorkspace() {
               onResetTurnCounter={() => setConsecutiveAutoTurns(0)}
             />
 
-            {/* Transcript Viewport */}
-            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
+            {/* Transcript Viewport with Dynamic Place & Time Background */}
+            <div className="relative flex-1 overflow-hidden">
+              {activeBackgroundUrl && (
+                <div
+                  className="pointer-events-none absolute inset-0 bg-cover bg-center bg-no-repeat transition-all duration-700"
+                  style={{ backgroundImage: `url("${activeBackgroundUrl}")` }}
+                />
+              )}
+              <div
+                className={` pointer-events-none absolute inset-0 transition-colors duration-700 ${
+                  activeBackgroundUrl
+                    ? 'bg-gradient-to-b from-slate-950/75 via-slate-950/65 to-slate-950/85 backdrop-blur-[1px]'
+                    : 'bg-slate-950'
+                }`}
+              />
+              <div className="relative z-10 h-full overflow-y-auto px-6 py-4 space-y-3">
               {messages.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center text-center text-slate-500">
                   <Sparkles className="h-10 w-10 text-indigo-400/60 mb-2" />
@@ -967,6 +1451,7 @@ export function ChatroomWorkspace() {
                 })
               )}
               <div ref={messagesEndRef} />
+              </div>
             </div>
 
             {/* Bottom Human Intervention Composer */}

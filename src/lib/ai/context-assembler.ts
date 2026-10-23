@@ -8,8 +8,9 @@ import {
   getActiveUserPersona,
   listLorebooksWithEntries,
   resolveCharacterOutfit,
+  resolveRoomLocationAndTime,
 } from '@/lib/db';
-import type { Character } from '@/lib/db/schema';
+import type { Character, TimeOfDay } from '@/lib/db/schema';
 
 export interface AssembledPromptPayload {
   targetCharacter: Character;
@@ -32,15 +33,35 @@ function sanitizeOpenAIName(rawName: string): string {
   return cleaned || 'Participant';
 }
 
+const TIME_OF_DAY_DESCRIPTIONS: Record<TimeOfDay, string> = {
+  dawn: 'Dawn (Early morning twilight, soft pink-gold horizon, cool morning air)',
+  morning: 'Morning (Bright natural daylight, fresh morning atmosphere)',
+  noon: 'Noon / Midday (High sun, bright clear lighting, active daytime atmosphere)',
+  sunset: 'Sunset / Dusk (Warm amber-violet golden hour, lengthening shadows)',
+  night: 'Night (Dark sky, artificial indoor lighting, streetlamps or moonlight)',
+  midnight: 'Late Night / Midnight (Deep quiet night, low lamp or candlelight, shadowy atmosphere)',
+};
+
 export function replaceTavernMacros(
   text: string,
   charName: string,
-  userName: string
+  userName: string,
+  extra?: { place?: string; subPlace?: string; time?: string }
 ): string {
   if (!text) return '';
-  return text
+  let out = text
     .replace(/\{\{\s*char\s*\}\}/gi, charName)
     .replace(/\{\{\s*user\s*\}\}/gi, userName);
+  if (extra?.place) {
+    out = out.replace(/\{\{\s*place\s*\}\}/gi, extra.place);
+  }
+  if (extra?.subPlace) {
+    out = out.replace(/\{\{\s*subplace\s*\}\}/gi, extra.subPlace);
+  }
+  if (extra?.time) {
+    out = out.replace(/\{\{\s*time\s*\}\}/gi, extra.time);
+  }
+  return out;
 }
 
 export function buildMultiCharacterPayload(
@@ -248,14 +269,49 @@ export function buildMultiCharacterPayload(
       )}`
     : '';
 
+  // Resolve current Place, Sub-Place, and Time of Day
+  const { placeName, subPlaces, activeSubPlace, timeOfDay, customTimeLabel } =
+    resolveRoomLocationAndTime(room);
+  const timeDescription = TIME_OF_DAY_DESCRIPTIONS[timeOfDay] || timeOfDay;
+  const effectiveTimeHeader = customTimeLabel.trim()
+    ? `${timeDescription} — Clock / Note: ${customTimeLabel.trim()}`
+    : timeDescription;
+  const siblingSubPlaces = subPlaces
+    .filter((sp) => sp.id !== activeSubPlace?.id)
+    .map((sp) => `${sp.name} (${sp.parentPlaceName || placeName})`);
+
+  const locationAndTimeLines: string[] = [
+    `- Main Place / Setting: ${placeName}`,
+    activeSubPlace
+      ? `- Current Sub-Place (Active Scene Area): ${activeSubPlace.name}${
+          activeSubPlace.description?.trim() ? ` — ${activeSubPlace.description.trim()}` : ''
+        }`
+      : `- Current Area: ${placeName}`,
+    `- Current Time of Day: ${effectiveTimeHeader}`,
+    siblingSubPlaces.length > 0
+      ? `- Other Connected Sub-Places Nearby: ${siblingSubPlaces.join(', ')}`
+      : '',
+    `All active characters in this room are currently situated in ${
+      activeSubPlace ? `the ${activeSubPlace.name} (${placeName})` : placeName
+    } during ${timeOfDay}${customTimeLabel.trim() ? ` (${customTimeLabel.trim()})` : ''}. Ground your physical actions, sensory details, and spatial awareness in this exact location and time.`,
+  ].filter(Boolean);
+
+  const locationAndTimeSection = `### CURRENT LOCATION & TIME\n${locationAndTimeLines.join('\n')}`;
+
   const systemPromptContent = [
     mainDirectiveSection,
     `### SCENARIO & SHARED ENVIRONMENT`,
     replaceTavernMacros(
       room.scenarioPrompt.trim() || 'An open multi-character conversation room.',
       targetCharacter.name,
-      effectiveUserName
+      effectiveUserName,
+      {
+        place: placeName,
+        subPlace: activeSubPlace?.name || placeName,
+        time: customTimeLabel.trim() || timeOfDay,
+      }
     ),
+    locationAndTimeSection,
     loreAfterScenario.length > 0
       ? `### WORLD LORE & CONTEXT\n${loreAfterScenario.join('\n')}`
       : '',

@@ -6,6 +6,9 @@ import type {
   CharacterOutfit,
   Room,
   RoomCharacter,
+  RoomSubPlace,
+  TimeOfDay,
+  ImageGenerationProvider,
   Message,
   MessageVersion,
   RoomQueueState,
@@ -23,7 +26,7 @@ declare global {
   // eslint-disable-next-line no-var
   var __sqliteDb: DatabaseSync | undefined;
   // eslint-disable-next-line no-var
-  var __tavernMigratedV4: boolean | undefined;
+  var __tavernMigratedV5: boolean | undefined;
 }
 
 function ensureColumn(db: DatabaseSync, table: string, colName: string, colDef: string) {
@@ -43,8 +46,45 @@ function stripUndefined<T extends object>(obj: T): Partial<T> {
   return cleaned;
 }
 
+function getDefaultBakerStreetSubPlaces(): RoomSubPlace[] {
+  return [
+    {
+      id: 'subplace_sitting_room',
+      name: 'Sitting Room',
+      parentPlaceName: '221B Baker Street',
+      description:
+        'A warm, cluttered Victorian study with twin armchairs by the crackling hearth, towering bookshelves, and a central investigation table.',
+      backgroundsByTime: {},
+    },
+    {
+      id: 'subplace_forensic_desk',
+      name: 'Chemical & Forensic Corner',
+      parentPlaceName: '221B Baker Street',
+      description:
+        'Glass retorts, Bunsen burners, brass microscopes, and reagent bottles arranged along the bay window workbench.',
+      backgroundsByTime: {},
+    },
+    {
+      id: 'subplace_kitchen',
+      name: "Mrs. Hudson's Kitchen",
+      parentPlaceName: '221B Baker Street',
+      description:
+        'Downstairs kitchen with a cast-iron range, whistling copper kettle, and a sturdy oak breakfast table.',
+      backgroundsByTime: {},
+    },
+    {
+      id: 'subplace_street_outside',
+      name: 'Baker Street Cobblestones',
+      parentPlaceName: '221B Baker Street',
+      description:
+        'Gas-lit London street outside 221B with hansom cabs rolling through swirling fog and wet cobblestones.',
+      backgroundsByTime: {},
+    },
+  ];
+}
+
 function runTavernMigrationsAndSeed(db: DatabaseSync) {
-  if (global.__tavernMigratedV4) return;
+  if (global.__tavernMigratedV5) return;
 
   // Migrate existing tables non-destructively
   ensureColumn(db, 'characters', 'avatar_url', 'TEXT');
@@ -59,6 +99,11 @@ function runTavernMigrationsAndSeed(db: DatabaseSync) {
   ensureColumn(db, 'rooms', 'summary_model_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'rooms', 'auto_summarize_interval', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'rooms', 'active_lorebook_ids_json', "TEXT NOT NULL DEFAULT '[\"lb_baker_street_01\"]'");
+  ensureColumn(db, 'rooms', 'current_place_name', "TEXT NOT NULL DEFAULT 'Main Location'");
+  ensureColumn(db, 'rooms', 'current_sub_place_id', 'TEXT');
+  ensureColumn(db, 'rooms', 'sub_places_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, 'rooms', 'current_time_of_day', "TEXT NOT NULL DEFAULT 'night'");
+  ensureColumn(db, 'rooms', 'custom_time_label', "TEXT NOT NULL DEFAULT ''");
 
   ensureColumn(db, 'llm_settings', 'temperature', 'REAL NOT NULL DEFAULT 0.75');
   ensureColumn(db, 'llm_settings', 'max_tokens', 'INTEGER NOT NULL DEFAULT 300');
@@ -73,6 +118,11 @@ function runTavernMigrationsAndSeed(db: DatabaseSync) {
   ensureColumn(db, 'llm_settings', 'active_persona_id', "TEXT NOT NULL DEFAULT 'persona_inspector_01'");
   ensureColumn(db, 'llm_settings', 'active_preset_id', 'TEXT');
   ensureColumn(db, 'llm_settings', 'favorite_models_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, 'llm_settings', 'image_provider', "TEXT NOT NULL DEFAULT 'pollinations'");
+  ensureColumn(db, 'llm_settings', 'image_base_url', "TEXT NOT NULL DEFAULT 'https://api.openai.com/v1'");
+  ensureColumn(db, 'llm_settings', 'image_api_key', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'llm_settings', 'image_model', "TEXT NOT NULL DEFAULT 'dall-e-3'");
+  ensureColumn(db, 'llm_settings', 'auto_generate_backgrounds', 'INTEGER NOT NULL DEFAULT 1');
 
   // Ensure Tavern tables match v2 schema (drop & recreate if legacy draft columns detected)
   const checkTableHasCol = (table: string, col: string) => {
@@ -325,7 +375,58 @@ function runTavernMigrationsAndSeed(db: DatabaseSync) {
     `).run();
   }
 
-  global.__tavernMigratedV4 = true;
+  // Seed default sub-places for Baker Street room if empty
+  const bakerRoom = db
+    .prepare("SELECT sub_places_json FROM rooms WHERE id = 'room_baker_street_01'")
+    .get() as { sub_places_json?: string } | undefined;
+  if (bakerRoom && (!bakerRoom.sub_places_json || bakerRoom.sub_places_json === '[]')) {
+    const defaultSubs = getDefaultBakerStreetSubPlaces();
+    db.prepare(`
+      UPDATE rooms
+      SET current_place_name = '221B Baker Street',
+          current_sub_place_id = 'subplace_sitting_room',
+          sub_places_json = ?,
+          current_time_of_day = 'midnight',
+          custom_time_label = '1:15 AM'
+      WHERE id = 'room_baker_street_01'
+    `).run(JSON.stringify(defaultSubs));
+  }
+
+  // Ensure any other existing rooms with empty sub_places_json have at least one default sub-place
+  const otherRooms = db
+    .prepare("SELECT id, title, current_place_name, sub_places_json FROM rooms WHERE sub_places_json IS NULL OR sub_places_json = '[]'")
+    .all() as Array<{ id: string; title: string; current_place_name?: string }>;
+  for (const r of otherRooms) {
+    const placeName = r.current_place_name && r.current_place_name !== 'Main Location'
+      ? r.current_place_name
+      : r.title.split(':')[0]?.trim() || 'Main Location';
+    const subId = `subplace_${ulid().toLowerCase()}`;
+    const defaultSubs: RoomSubPlace[] = [
+      {
+        id: subId,
+        name: 'Main Area',
+        parentPlaceName: placeName,
+        description: `Primary area of ${placeName}.`,
+        backgroundsByTime: {},
+      },
+      {
+        id: `subplace_${ulid().toLowerCase()}`,
+        name: 'Living Room',
+        parentPlaceName: placeName,
+        description: `Comfortable living and gathering room inside ${placeName}.`,
+        backgroundsByTime: {},
+      },
+    ];
+    db.prepare(`
+      UPDATE rooms
+      SET current_place_name = ?,
+          current_sub_place_id = ?,
+          sub_places_json = ?
+      WHERE id = ?
+    `).run(placeName, subId, JSON.stringify(defaultSubs), r.id);
+  }
+
+  global.__tavernMigratedV5 = true;
 }
 
 function getRawDb(): DatabaseSync {
@@ -640,6 +741,48 @@ export function resolveCharacterOutfit(
   return { outfits, activeOutfit, effectiveAvatarUrl };
 }
 
+export function parseRoomSubPlaces(subPlacesJson?: string | null): RoomSubPlace[] {
+  if (!subPlacesJson) return [];
+  try {
+    const parsed = JSON.parse(subPlacesJson);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function resolveRoomLocationAndTime(room: Room): {
+  placeName: string;
+  subPlaces: RoomSubPlace[];
+  activeSubPlace: RoomSubPlace | null;
+  timeOfDay: TimeOfDay;
+  customTimeLabel: string;
+  activeBackgroundUrl: string | null;
+} {
+  const subPlaces = parseRoomSubPlaces(room.subPlacesJson);
+  const activeSubPlace =
+    (room.currentSubPlaceId
+      ? subPlaces.find((sp) => sp.id === room.currentSubPlaceId)
+      : subPlaces[0]) ??
+    subPlaces[0] ??
+    null;
+  const placeName =
+    activeSubPlace?.parentPlaceName || room.currentPlaceName || 'Main Location';
+  const timeOfDay: TimeOfDay = room.currentTimeOfDay || 'night';
+  const customTimeLabel = room.customTimeLabel || '';
+  const activeBackgroundUrl =
+    activeSubPlace?.backgroundsByTime?.[timeOfDay] ?? null;
+
+  return {
+    placeName,
+    subPlaces,
+    activeSubPlace,
+    timeOfDay,
+    customTimeLabel,
+    activeBackgroundUrl,
+  };
+}
+
 // Row mappers
 function mapCharacter(row: Record<string, unknown>): Character {
   return {
@@ -675,6 +818,11 @@ function mapRoom(row: Record<string, unknown>): Room {
     summaryModelId: String(row.summary_model_id ?? ''),
     autoSummarizeInterval: Number(row.auto_summarize_interval ?? 0),
     activeLorebookIdsJson: String(row.active_lorebook_ids_json ?? '["lb_baker_street_01"]'),
+    currentPlaceName: String(row.current_place_name ?? 'Main Location'),
+    currentSubPlaceId: row.current_sub_place_id ? String(row.current_sub_place_id) : null,
+    subPlacesJson: String(row.sub_places_json ?? '[]'),
+    currentTimeOfDay: ((row.current_time_of_day as TimeOfDay) ?? 'night'),
+    customTimeLabel: String(row.custom_time_label ?? ''),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
@@ -886,20 +1034,54 @@ export function createRoom(input: {
   cooldownMs?: number;
   maxAutoTurns?: number;
   contextWindowLimit?: number;
+  currentPlaceName?: string;
+  currentTimeOfDay?: TimeOfDay;
+  customTimeLabel?: string;
+  subPlaces?: RoomSubPlace[];
   roster?: Array<{ characterId: string; relationshipContext?: string }>;
 }): RoomWithDetails {
   const db = getRawDb();
   const roomId = `room_${ulid().toLowerCase()}`;
   const now = Date.now();
+  const placeName = input.currentPlaceName?.trim() || input.title.split(':')[0]?.trim() || 'Main Location';
+  const defaultSubPlaces: RoomSubPlace[] =
+    input.subPlaces && input.subPlaces.length > 0
+      ? input.subPlaces
+      : [
+          {
+            id: `subplace_${ulid().toLowerCase()}`,
+            name: 'Living Room',
+            parentPlaceName: placeName,
+            description: `Main living & gathering space in ${placeName}.`,
+            backgroundsByTime: {},
+          },
+          {
+            id: `subplace_${ulid().toLowerCase()}`,
+            name: 'Bedroom',
+            parentPlaceName: placeName,
+            description: `Private bedroom area in ${placeName}.`,
+            backgroundsByTime: {},
+          },
+          {
+            id: `subplace_${ulid().toLowerCase()}`,
+            name: 'Kitchen',
+            parentPlaceName: placeName,
+            description: `Kitchen and dining space in ${placeName}.`,
+            backgroundsByTime: {},
+          },
+        ];
+  const initialSubPlaceId = defaultSubPlaces[0]?.id ?? null;
 
   db.exec('BEGIN IMMEDIATE TRANSACTION');
   try {
     db.prepare(`
       INSERT INTO rooms (
         id, title, scenario_prompt, user_display_name, turn_strategy, cooldown_ms,
-        max_auto_turns, context_window_limit, memory_box, active_lorebook_ids_json, created_at, updated_at
+        max_auto_turns, context_window_limit, memory_box, active_lorebook_ids_json,
+        current_place_name, current_sub_place_id, sub_places_json, current_time_of_day, custom_time_label,
+        created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '["lb_baker_street_01"]', ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '["lb_baker_street_01"]', ?, ?, ?, ?, ?, ?, ?)
     `).run(
       roomId,
       input.title,
@@ -909,6 +1091,11 @@ export function createRoom(input: {
       input.cooldownMs ?? 3000,
       input.maxAutoTurns ?? 8,
       input.contextWindowLimit ?? 30,
+      placeName,
+      initialSubPlaceId,
+      JSON.stringify(defaultSubPlaces),
+      input.currentTimeOfDay ?? 'morning',
+      input.customTimeLabel ?? '',
       now,
       now
     );
@@ -961,7 +1148,10 @@ export function updateRoom(
       SET title = ?, scenario_prompt = ?, user_display_name = ?, turn_strategy = ?,
           cooldown_ms = ?, max_auto_turns = ?, context_window_limit = ?,
           memory_box = ?, summary_model_id = ?, auto_summarize_interval = ?,
-          active_lorebook_ids_json = ?, updated_at = ?
+          active_lorebook_ids_json = ?,
+          current_place_name = ?, current_sub_place_id = ?, sub_places_json = ?,
+          current_time_of_day = ?, custom_time_label = ?,
+          updated_at = ?
       WHERE id = ?
     `).run(
       r.title,
@@ -975,6 +1165,11 @@ export function updateRoom(
       r.summaryModelId,
       r.autoSummarizeInterval,
       r.activeLorebookIdsJson,
+      r.currentPlaceName ?? 'Main Location',
+      r.currentSubPlaceId ?? null,
+      r.subPlacesJson ?? '[]',
+      r.currentTimeOfDay ?? 'night',
+      r.customTimeLabel ?? '',
       now,
       roomId
     );
@@ -1380,6 +1575,11 @@ export function getLlmSettings(): LlmSettings {
     activePersonaId: String(row.active_persona_id ?? 'persona_inspector_01'),
     activePresetId: row.active_preset_id ? String(row.active_preset_id) : null,
     favoriteModelsJson: String(row.favorite_models_json ?? '[]'),
+    imageProvider: ((row.image_provider as ImageGenerationProvider) || 'pollinations'),
+    imageBaseUrl: String(row.image_base_url || 'https://api.openai.com/v1'),
+    imageApiKey: String(row.image_api_key || ''),
+    imageModel: String(row.image_model || 'dall-e-3'),
+    autoGenerateBackgrounds: row.auto_generate_backgrounds === undefined ? true : Boolean(row.auto_generate_backgrounds),
     updatedAt: Number(row.updated_at),
   };
 }
@@ -1394,7 +1594,10 @@ export function updateLlmSettings(patch: Partial<Omit<LlmSettings, 'id' | 'updat
         temperature = ?, max_tokens = ?, top_p = ?, top_k = ?, min_p = ?,
         repetition_penalty = ?, frequency_penalty = ?, presence_penalty = ?,
         active_system_prompt_id = ?, personas_enabled = ?, active_persona_id = ?,
-        active_preset_id = ?, favorite_models_json = ?, updated_at = ?
+        active_preset_id = ?, favorite_models_json = ?,
+        image_provider = ?, image_base_url = ?, image_api_key = ?, image_model = ?,
+        auto_generate_backgrounds = ?,
+        updated_at = ?
     WHERE id = 'default'
   `).run(
     next.baseUrl,
@@ -1414,6 +1617,11 @@ export function updateLlmSettings(patch: Partial<Omit<LlmSettings, 'id' | 'updat
     next.activePersonaId,
     next.activePresetId ?? null,
     next.favoriteModelsJson,
+    next.imageProvider ?? 'pollinations',
+    next.imageBaseUrl ?? 'https://api.openai.com/v1',
+    next.imageApiKey ?? '',
+    next.imageModel ?? 'dall-e-3',
+    next.autoGenerateBackgrounds ? 1 : 0,
     next.updatedAt
   );
   return getLlmSettings();

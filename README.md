@@ -126,9 +126,9 @@ stateDiagram-v2
 * **Node.js**: `v22.0.0` or newer (Recommended: Node 22 or Node 26 with built-in `node:sqlite`).
 * **Package Manager**: `npm`, `pnpm`, or `yarn`.
 * **LLM Provider Options**:
-  * **Cloud**: OpenAI API key or OpenRouter API key.
-  * **Local (Free & Offline)**: [Ollama](https://ollama.com/) (`http://localhost:11434/v1`) or [LM Studio](https://lmstudio.ai/) (`http://localhost:1234/v1`).
-  * **Zero-Setup Mock Mode**: If no API key or local model is configured, the built-in simulated generator will take over automatically so you can test the entire UI immediately.
+  * **Zero-Key / Free Built-in Engine**: Built-in **Local Simulated Roleplay Engine** (100% free, offline, instant responses with zero external keys or setup).
+  * **Cloud APIs**: Official OpenAI (`https://api.openai.com/v1`), Anthropic Claude Messages API (`https://api.anthropic.com/v1`), Google Gemini AI Studio (`https://generativelanguage.googleapis.com/v1beta/openai`), OpenRouter gateway (`https://openrouter.ai/api/v1`), or any Custom OpenAI-Compatible endpoint (DeepSeek, Groq, Together, vLLM).
+  * **Local Offline Inference**: [Ollama](https://ollama.com/) (`http://localhost:11434/v1`) or [LM Studio](https://lmstudio.ai/) (`http://localhost:1234/v1`).
 
 ---
 

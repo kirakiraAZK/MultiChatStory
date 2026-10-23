@@ -10,6 +10,7 @@ import {
   resolveNextCharacterId,
   extractMentionedCharacterIds,
 } from '@/lib/ai/turn-scheduler';
+import { detectAndApplyEnvironmentFromNarration } from '@/lib/ai/location-detector';
 
 export async function GET(
   _req: Request,
@@ -57,6 +58,9 @@ export async function POST(
     status: 'completed',
   });
 
+  // Automatically detect Place, Sub-Place, and Time of Day shifts from user narration / stage direction
+  const environmentTransition = detectAndApplyEnvironmentFromNarration(roomId, content);
+
   const mentionedCharacterIds = extractMentionedCharacterIds(content, details.roster);
   const nextCharId =
     mentionedCharacterIds.length > 0
@@ -77,6 +81,7 @@ export async function POST(
       message: created,
       nextCharacterId: nextCharId,
       mentionedCharacterIds,
+      environmentTransition,
     },
     { status: 201 }
   );

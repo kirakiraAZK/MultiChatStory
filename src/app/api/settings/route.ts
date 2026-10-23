@@ -52,6 +52,14 @@ export async function PATCH(req: Request) {
     activePersonaId: body.activePersonaId !== undefined ? String(body.activePersonaId) : undefined,
     activePresetId: body.activePresetId !== undefined ? (body.activePresetId ? String(body.activePresetId) : null) : undefined,
     favoriteModelsJson: body.favoriteModelsJson !== undefined ? String(body.favoriteModelsJson) : undefined,
+    imageProvider: body.imageProvider !== undefined ? body.imageProvider : undefined,
+    imageBaseUrl: body.imageBaseUrl !== undefined ? String(body.imageBaseUrl).trim() : undefined,
+    imageApiKey: body.imageApiKey !== undefined ? String(body.imageApiKey).trim() : undefined,
+    imageModel: body.imageModel !== undefined ? String(body.imageModel).trim() : undefined,
+    autoGenerateBackgrounds:
+      body.autoGenerateBackgrounds !== undefined
+        ? Boolean(body.autoGenerateBackgrounds)
+        : undefined,
   });
 
   return NextResponse.json({

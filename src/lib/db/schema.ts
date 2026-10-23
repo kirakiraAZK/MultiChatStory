@@ -8,6 +8,23 @@ export interface CharacterOutfit {
   behaviorModifier?: string;
 }
 
+export type TimeOfDay = 'dawn' | 'morning' | 'noon' | 'sunset' | 'night' | 'midnight';
+
+export interface RoomSubPlace {
+  id: string;
+  name: string;
+  parentPlaceName: string;
+  description: string;
+  backgroundsByTime: Partial<Record<TimeOfDay, string>>;
+}
+
+export type ImageGenerationProvider =
+  | 'pollinations'
+  | 'openai'
+  | 'nanobanana'
+  | 'sd_webui'
+  | 'manual_only';
+
 export const characters = sqliteTable('characters', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
@@ -41,6 +58,15 @@ export const rooms = sqliteTable('rooms', {
   summaryModelId: text('summary_model_id').notNull().default(''),
   autoSummarizeInterval: integer('auto_summarize_interval').notNull().default(0),
   activeLorebookIdsJson: text('active_lorebook_ids_json').notNull().default('[]'),
+  currentPlaceName: text('current_place_name').notNull().default('Main Location'),
+  currentSubPlaceId: text('current_sub_place_id'),
+  subPlacesJson: text('sub_places_json').notNull().default('[]'),
+  currentTimeOfDay: text('current_time_of_day', {
+    enum: ['dawn', 'morning', 'noon', 'sunset', 'night', 'midnight'],
+  })
+    .notNull()
+    .default('night'),
+  customTimeLabel: text('custom_time_label').notNull().default(''),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 });
@@ -151,6 +177,17 @@ export const llmSettings = sqliteTable('llm_settings', {
   activePersonaId: text('active_persona_id').notNull().default('persona_default'),
   activePresetId: text('active_preset_id'),
   favoriteModelsJson: text('favorite_models_json').notNull().default('[]'),
+  imageProvider: text('image_provider', {
+    enum: ['pollinations', 'openai', 'nanobanana', 'sd_webui', 'manual_only'],
+  })
+    .notNull()
+    .default('pollinations'),
+  imageBaseUrl: text('image_base_url').notNull().default('https://api.openai.com/v1'),
+  imageApiKey: text('image_api_key').notNull().default(''),
+  imageModel: text('image_model').notNull().default('dall-e-3'),
+  autoGenerateBackgrounds: integer('auto_generate_backgrounds', { mode: 'boolean' })
+    .notNull()
+    .default(true),
   updatedAt: integer('updated_at').notNull(),
 });
 
