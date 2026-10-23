@@ -1,5 +1,13 @@
 import { NextResponse } from 'next/server';
-import { getRoomWithDetails, updateRoom, deleteRoom, listRoomMessages } from '@/lib/db';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {
+  getRoomWithDetails,
+  updateRoom,
+  deleteRoom,
+  listRoomMessages,
+  parseRoomSubPlaces,
+} from '@/lib/db';
 import { resolveNextCharacterId } from '@/lib/ai/turn-scheduler';
 
 export async function GET(
@@ -38,6 +46,38 @@ export async function DELETE(
   context: { params: Promise<{ roomId: string }> }
 ) {
   const { roomId } = await context.params;
+
+  // 1. Clean up physical generated background image cache files on disk
+  try {
+    const details = getRoomWithDetails(roomId);
+    const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'backgrounds');
+    const safeRoom = roomId.replace(/[^a-zA-Z0-9_-]/g, '');
+
+    const filenamesToDelete = new Set<string>();
+    if (details?.room.subPlacesJson) {
+      const subPlaces = parseRoomSubPlaces(details.room.subPlacesJson);
+      for (const sp of subPlaces) {
+        if (sp.backgroundsByTime) {
+          for (const url of Object.values(sp.backgroundsByTime)) {
+            if (typeof url === 'string' && url.startsWith('/uploads/backgrounds/')) {
+              filenamesToDelete.add(path.basename(url));
+            }
+          }
+        }
+      }
+    }
+
+    const files = await fs.readdir(uploadDir).catch(() => [] as string[]);
+    for (const f of files) {
+      if (f.startsWith(`bg_${safeRoom}_`) || filenamesToDelete.has(f)) {
+        await fs.unlink(path.join(uploadDir, f)).catch(() => {});
+      }
+    }
+  } catch {
+    // Disk cleanup error ignored to allow DB deletion to proceed
+  }
+
+  // 2. Cascade delete all chat messages, versions, queue states, and room record in SQLite
   deleteRoom(roomId);
   return NextResponse.json({ ok: true });
 }
