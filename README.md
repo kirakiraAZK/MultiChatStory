@@ -1,140 +1,152 @@
 # MultiChat Studio
 
-> **Localhost Multi-Character AI Chatroom & Persona Orchestration Engine**  
-> Built with Next.js 15 (App Router), Node.js native `node:sqlite` (WAL Mode), OpenAI-compatible SSE Streaming, and Moescape/Tavern-style story controls.
+> **Interactive Multi-Character AI Storytelling & Roleplay Studio for Your Computer**  
+> Run lively group roleplay where multiple AI characters talk to you and to each other in shared scenes, complete with changing locations, time of day, AI-generated backgrounds, and wardrobe changes.  
+> *100% private, runs on your machine, with zero-setup free offline mode or your favorite AI providers (OpenAI, Claude, Gemini, Ollama, OpenRouter, LM Studio).*
 
 ---
 
-## 🏛️ System Architecture
+## 🧭 What is MultiChat Studio?
 
-```mermaid
-flowchart TD
-    subgraph Client["Frontend Client (Next.js 15 App Router / React)"]
-        UI["Chatroom Workspace & Transcript"]
-        Bar["Orchestrator Bar (Auto-Chat / Cooldown / Abort)"]
-        Composer["Composer (@Mentions & Quick Responses)"]
-        Roster["Roster Sidebar (Turn Order & Mid-Chat Outfit Switcher)"]
-        Modal["Tavern Chat Settings (7 Tabs)"]
-    end
-
-    subgraph Server["Next.js Server & Engine"]
-        APIRoute["API Routes (/api/rooms, /stream, /quick-responses)"]
-        Scheduler["Turn Scheduler (@Mention Priority & Queue)"]
-        Assembler["Context Assembler (Perspective Isolation & Wardrobe)"]
-        StreamMgr["Stream Manager (SSE & AbortController Registry)"]
-    end
-
-    subgraph Storage["Localhost Persistence & AI"]
-        SQLite[("Node.js native SQLite (multichat.db)")]
-        Disk["/public/uploads/avatars/ (Portraits)"]
-        LLM["OpenAI / OpenRouter / Ollama / LM Studio API"]
-    end
-
-    Composer -->|User message / @mention| APIRoute
-    Bar -->|Dispatch / Abort Signal| StreamMgr
-    Roster -->|Switch Outfit / Reorder| APIRoute
-    Modal -->|Update Prompts / Personas / Lore| APIRoute
-    APIRoute --> Scheduler
-    Scheduler --> Assembler
-    Assembler --> StreamMgr
-    StreamMgr -->|Real-time Token Stream SSE| UI
-    StreamMgr -->|Prompt Payload| LLM
-    APIRoute <-->|Read / Write State| SQLite
-    APIRoute <-->|Upload / Serve Images| Disk
-```
+Imagine a visual novel or tabletop RPG where:
+* You can put **multiple AI characters in the same room**. They respond to what you say and naturally banter, argue, or collaborate with each other.
+* You can **travel to different places and times** (e.g., from *Home: Living Room* in the morning to *Tokyo: Neon Alley* at midnight).
+* The **chat background changes dynamically** with visual novel-style art generated for each location and time of day.
+* Characters can **change outfits mid-story**, and other characters will notice what they are wearing.
+* You are the **story director**: you can pause, edit messages, step turns one-by-one, let auto-chat run, or mention specific characters (`@Name`).
+* **Runs completely free out of the box** using the built-in Local Simulated Engine, or connects to Claude, Gemini, OpenAI, or local Ollama with one click.
 
 ---
 
 ## 🌟 Key Features
 
-### 1. Multi-Character AI Chatrooms
-* **Multi-Agent Conversations**: Assign two or more AI characters to a room. Characters talk to the human user and interact dynamically with each other in the same shared scene.
-* **Speaker Isolation & Perspective Assembly**: Each character prompt is assembled with strict perspective separation—the model is given only its own persona instructions, while prior dialogue from other characters and the user is clearly attributed in transcripts.
-
-### 2. Autonomous Turn-Taking & Orchestration Engine
-* **Flexible Turn Strategies**:
-  * **Round-Robin**: Sequentially passes turns through the room roster.
-  * **Dynamic Relevance Router**: Evaluates who was addressed or most relevant to the latest turn.
-  * **Manual Trigger Only**: The director decides exactly who speaks and when.
-* **Countdown Buffer & Cooldown**: Visual countdown buffer before each turn dispatch, giving you time to read, pause, or intervene.
-* **Configurable Loop Cap**: Set maximum consecutive auto-turns (e.g., 8 turns) to prevent runaway token usage.
-* **Real-Time Stream Interruption**: Instant **Pause**, **Resume**, and **Stop & Abort** buttons leveraging native `AbortController` over Server-Sent Events (SSE).
-
-```mermaid
-stateDiagram-v2
-    [*] --> IDLE
-
-    IDLE --> QUEUED : User sends message / Clicks "Step Turn" / Auto-Chat triggers
-    IDLE --> QUEUED : Explicit @Character mention in chat
-
-    QUEUED --> STREAMING : POST /api/rooms/:id/stream starts SSE
-
-    STREAMING --> STREAMING : Real-time token deltas received
-    STREAMING --> PAUSED : User clicks "Stop & Abort" (AbortController triggered)
-    PAUSED --> IDLE : User resumes or edits transcript
-
-    STREAMING --> COOLDOWN : Stream completes (Event: done)
-
-    state COOLDOWN {
-        [*] --> TimerRunning
-        TimerRunning --> SkipTrigger : User clicks "Skip Cooldown"
-        TimerRunning --> TurnDispatched : Cooldown countdown reaches 0s
-    }
-
-    COOLDOWN --> QUEUED : Next turn in queue (or next @mentioned character)
-    COOLDOWN --> IDLE : Max auto-turns reached OR @mention chain finished
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                             MultiChat Studio                                │
+├──────────────────────┬────────────────────────────┬─────────────────────────┤
+│  🎭 Multi-Character  │  🌄 Dynamic Places & Time  │  👗 Wardrobe & Outfits  │
+│  Group chats where   │  Move between rooms & times│  Change character       │
+│  AI characters talk  │  with auto-generated anime │  costumes mid-chat with │
+│  to you & each other │  background wallpapers.    │  visual portraits.      │
+├──────────────────────┼────────────────────────────┼─────────────────────────┤
+│  🧠 Smart AI Gateway │  🎬 Director Controls      │  🔒 100% Private        │
+│  Free built-in engine│  Auto-chat, cooldowns,     │  All chats, characters, │
+│  + OpenAI, Claude,   │  @mentions, rewinds, and   │  and images stay safely │
+│  Gemini & Ollama.    │  in-line message editing.  │  on your hard drive.    │
+└──────────────────────┴────────────────────────────┴─────────────────────────┘
 ```
 
-### 3. `@character` Mention System
-* **Targeted Invocation**: Type `@` or click a character's mention pill (e.g., `@Sarah Chen` or `@Elria`) to trigger **only** that character to speak.
-* **AI-to-AI Handoffs**: Characters recognize each other's `@mentions`. If an AI character mentions another cast member in dialogue, the turn engine automatically passes the floor to that character next.
-* **Interactive Autocomplete**: Live popup suggestions when typing `@` in the chat composer.
+### 1. 🎭 Multi-Character Group Conversations
+* **True Multi-Agent Chat**: Put 2, 3, or more characters together. Characters talk directly to you and each other in natural dialogue.
+* **Smart Perspective Separation**: Each character only sees the story through their own eyes and personality—they never accidentally speak for you or write from another character's point of view.
 
-### 4. "Quick Responses" (3x User Reply Suggestions)
-* **Context-Aware Suggestions**: Click the **Quick Responses** wand to generate 3 natural, in-character user responses from your active Persona (`{{user}}`).
-* **Click to Edit**: Click any suggested response to load it into the message input box for fine-tuning before sending.
-* **One-Click Regenerate**: Regenerate 3 fresh options anytime.
+### 2. 🌄 Places, Sub-Places & Dynamic Time of Day
+* **Organized Locations**: Group locations into Main Places and Sub-Places:
+  * *Example:* **Home** ➔ *Living Room*, *Kitchen*, *Bedroom*, *Balcony*.
+  * *Example:* **Sci-Fi Starship** ➔ *Bridge*, *Engine Room*, *Mess Hall*.
+* **6 Time-of-Day Slots**: Switch between `Dawn`, `Morning`, `Noon`, `Sunset`, `Night`, and `Midnight`, or type custom times (e.g. *"2:15 AM, Heavy Rain"*).
+* **Two Ways to Travel**:
+  1. **Quick Dropdowns**: Change the Place, Sub-Place, or Time instantly from the top bar.
+  2. **Natural Story Narration**: Write actions like *"We walked to the kitchen at night"* or *"Let's head to the park at sunset"*—the engine automatically detects location and time shifts in your story!
 
-### 5. Character Wardrobe & Multi-Outfit System
-* **Base Physical Traits**: Separate permanent traits (hair, eyes, height, body build) from temporary clothing.
-* **Multiple Outfits per Character**: Add unlimited costumes with custom outfit names, clothing descriptions, behavior/mood notes, and optional dedicated portraits.
-* **Mid-Chat Outfit Switcher**: Change a character's outfit mid-story in the right-hand sidebar. Their avatar and prompt identity update immediately, and other characters in the room will notice what they are wearing!
+### 3. 🎨 Dynamic Visual Novel Backgrounds
+* **Automatic Scenic Art**: When you move to a new location or change the time of day, the studio can automatically generate high-quality anime-style background art.
+* **Cached Once Per Scene**: Backgrounds generate only once per location and time of day, keeping generation fast and saving costs.
+* **Custom Image Upload**: Prefer your own photo or wallpaper? You can upload custom background images for any sub-place and time slot with one click.
+* **Safe Cleanup**: When you delete a chatroom, all cached background files for that room are automatically cleaned up from your disk.
 
-### 6. Unified Tavern Chat Settings (Moescape-Style)
-* **Model & Sampler Tuning**: Real-time sampler sliders (Temperature, Response Tokens, Top-P, Top-K, Min-P, Repetition Penalty, Frequency/Presence Penalty).
-* **Provider Presets**: 1-click connection presets for **OpenAI**, **OpenRouter**, **Ollama (Local)**, and **LM Studio (Local)**.
-* **System Prompt Presets**: Manage global writing directives (`Roleplay`, `Spicy Roleplay`, `Default`, `Long Responses`, `Sol Narrator`) with `{{char}}` and `{{user}}` macro support.
-* **User Personas**: Describe yourself to characters with custom display names, bios, and portraits.
-* **Shared Memory & Auto-Summary**: Universal room memory box with an **Auto-Summarize** tool that condenses the transcript into key facts.
-* **Lorebooks (World Info)**: Create lore entries with keyword triggers that inject into LLM context when mentioned in conversation.
+### 4. 👗 Character Wardrobe & Outfits
+* **Permanent Traits vs. Clothing**: Define permanent physical features (hair, eyes, height, build) separately from temporary clothes.
+* **Multiple Costumes**: Give any character alternate outfits (e.g., *Casual Pajamas*, *School Uniform*, *Battle Armor*, *Formal Dress*), each with its own clothing description and dedicated portrait.
+* **Mid-Chat Costume Changes**: Change a character's outfit during conversation via the right sidebar. Their portrait updates immediately, and everyone in the room will react to what they are wearing!
 
-### 7. Human-in-the-Loop Interventions
-* **Inline Message Editing**: Edit any prior user or character response directly in the transcript; subsequent AI turns immediately feed on the edited text.
-* **Multi-Version Regeneration**: Regenerate any character response in-place with version tracking (`v1/3`, `v2/3`, `v3/3`).
-* **Rewind & Branch**: Rewind history to any point, trimming subsequent messages to branch off into a new narrative direction.
-* **Safe Deletions**: Individual message deletion and room deletion with safety confirmation dialogs.
+### 5. 🎬 Director Controls & Auto-Chat
+* **Auto-Chat Mode**: Sit back and watch the conversation unfold automatically with customizable turn pacing.
+* **Cooldown Buffer**: A visible countdown bar lets you read responses comfortably before the next character speaks, with **Skip Cooldown** and **Pause / Abort** buttons.
+* **`@character` Mentions**: Type `@` to select who should speak next. Characters can also mention each other in dialogue, naturally passing the conversation floor!
+* **Quick Responses**: Click the magic wand button to generate 3 smart reply suggestions written in your character's voice. Click any option to send or tweak it.
 
-### 8. 100% Localhost & Privacy First
-* Powered by Node's built-in `node:sqlite` in WAL mode—no external database servers required.
-* Uploaded character portraits and avatars are saved locally to `/public/uploads/avatars/`.
-* SQLite databases, local portraits, and API keys are ignored by `.gitignore`.
+### 6. ✍️ Full Story Interventions (Edit, Regenerate, Rewind)
+* **In-Line Message Editing**: Click the pencil icon on any past message to fix a typo or steer the plot. All future AI turns adapt to your edit immediately.
+* **Versioned Regenerations**: Don't like a character's reply? Click **Regenerate** to roll an alternate response (`v1/3`, `v2/3`, `v3/3`) and flip between them anytime.
+* **Rewind & Branch**: Rewind history to any point, trimming subsequent messages to branch your story in an exciting new direction.
+
+### 7. 🔌 Flexible AI Models & Providers
+* **Local Simulated Roleplay Engine (Built-In & Free)**: Works 100% offline with zero setup and zero API keys needed. Perfect for immediate testing and private fun without cost.
+* **Dedicated Cloud & Local Presets**:
+  * **OpenAI** (`https://api.openai.com/v1`) — GPT-4o, GPT-4o-mini
+  * **Claude (Anthropic)** (`https://api.anthropic.com/v1`) — Claude 3.5 Sonnet, Claude 3.5 Haiku
+  * **Google Gemini** (`https://generativelanguage.googleapis.com/v1beta/openai`) — Gemini 2.0 Flash, Gemini 1.5 Pro
+  * **OpenRouter** (`https://openrouter.ai/api/v1`) — Access hundreds of open & commercial models
+  * **Ollama (Local & Free)** (`http://localhost:11434/v1`) — Llama 3.2, Qwen 2.5, DeepSeek, Mistral
+  * **LM Studio (Local & Free)** (`http://localhost:1234/v1`) — Any local `.gguf` weights
+  * **Custom OpenAI-Compatible** — Connect any private server (Groq, Together AI, vLLM, KoboldCPP)
+* **Honest Model Lists**: If no API key is entered, no phantom remote models are shown. You are always in control of your connections.
+
+### 8. 🏰 Moescape / Tavern Storytelling Settings
+* **User Personas**: Create multiple personas for yourself (name, bio, avatar) so characters address you accurately.
+* **World Lorebooks**: Add world lore entries that inject into the AI's mind only when relevant keywords are mentioned.
+* **System Prompt Presets**: Switch between writing styles (*Roleplay*, *Spicy*, *Novelistic*, *Short Dialogue*).
+* **Story Memory & Auto-Summaries**: Keep a persistent memory box, or click **Summarize Room** to let the AI condense hundreds of messages into key memory bullet points.
+
+---
+
+## 🏛️ How It Works (System Architecture)
+
+```mermaid
+flowchart TD
+    subgraph UI["Frontend Interface (Your Browser)"]
+        Chat["Chatroom Workspace & Transcript"]
+        Bar["Director Bar (Auto-Chat, Cooldown, Abort)"]
+        Places["Place & Time Selectors (Living Room, Night, etc.)"]
+        Side["Roster & Costume Switcher"]
+        Settings["Tavern Settings (Models, Lore, Memory, Personas)"]
+    end
+
+    subgraph Server["MultiChat Studio Engine"]
+        TurnMgr["Turn Scheduler (@Mention Priority & Auto-Loop)"]
+        LocDetector["Location & Time Shift Detector"]
+        Context["Context Assembler (Persona, Clothes, Scene, Lore)"]
+        Streamer["Real-Time Streaming Engine (SSE)"]
+        ImageGen["Background Generator (Pollinations / OpenAI)"]
+    end
+
+    subgraph Storage["Your Computer (Private Storage)"]
+        DB[("SQLite Database (multichat.db)")]
+        Avatars["/public/uploads/avatars/"]
+        Backgrounds["/public/uploads/backgrounds/"]
+        AI["Active AI Provider (Simulated / Claude / Gemini / OpenAI / Ollama)"]
+    end
+
+    Chat -->|Send message / Edit / Rewind| TurnMgr
+    Places -->|Change place or time| LocDetector
+    LocDetector -->|New scene entered| ImageGen
+    ImageGen -->|Save & cache wallpaper| Backgrounds
+    TurnMgr --> Context
+    Context --> Streamer
+    Streamer -->|Real-time text streaming| Chat
+    Streamer --> AI
+    Server <-->|Store rooms, messages, characters| DB
+    Server <-->|Store portraits| Avatars
+```
 
 ---
 
 ## 💻 System Requirements
 
-* **Node.js**: `v22.0.0` or newer (Recommended: Node 22 or Node 26 with built-in `node:sqlite`).
+* **Operating System**: Windows, macOS, or Linux.
+* **Node.js**: `v22.0.0` or newer (Node 22 or 26 recommended; uses Node's built-in fast SQLite engine).
 * **Package Manager**: `npm`, `pnpm`, or `yarn`.
-* **LLM Provider Options**:
-  * **Zero-Key / Free Built-in Engine**: Built-in **Local Simulated Roleplay Engine** (100% free, offline, instant responses with zero external keys or setup).
-  * **Cloud APIs**: Official OpenAI (`https://api.openai.com/v1`), Anthropic Claude Messages API (`https://api.anthropic.com/v1`), Google Gemini AI Studio (`https://generativelanguage.googleapis.com/v1beta/openai`), OpenRouter gateway (`https://openrouter.ai/api/v1`), or any Custom OpenAI-Compatible endpoint (DeepSeek, Groq, Together, vLLM).
-  * **Local Offline Inference**: [Ollama](https://ollama.com/) (`http://localhost:11434/v1`) or [LM Studio](https://lmstudio.ai/) (`http://localhost:1234/v1`).
+* **AI Provider Options**:
+  * **Completely Free (Zero Setup)**: Built-in Local Simulated Engine.
+  * **Completely Free (Offline Local AI)**: [Ollama](https://ollama.com/) or [LM Studio](https://lmstudio.ai/).
+  * **Cloud APIs**: API key from Google AI Studio, Anthropic, OpenAI, or OpenRouter.
 
 ---
 
-## 🚀 Installation & Setup Tutorial
+## 🚀 Quick Start Tutorial
 
-### Step 1: Clone the Repository
+### Step 1: Download the Project
 ```bash
 git clone https://github.com/your-username/MultiChatStory.git
 cd MultiChatStory
@@ -145,162 +157,82 @@ cd MultiChatStory
 npm install
 ```
 
-### Step 3: Configure Environment (Optional)
-Copy the example environment file:
-```bash
-cp .env.example .env.local
-```
-Edit `.env.local` with your preferred default settings (you can also configure this later in the UI):
-```env
-LLM_BASE_URL="https://api.openai.com/v1"
-LLM_API_KEY="your-openai-api-key-here"
-LLM_DEFAULT_MODEL="gpt-4o-mini"
-```
-
-> [!TIP]
-> If you are using **Ollama** locally, set `LLM_BASE_URL="http://localhost:11434/v1"` and leave `LLM_API_KEY=""`.
-
-### Step 4: Start the Local Development Server
+### Step 3: Start the Studio
 ```bash
 npm run dev
 ```
 
-### Step 5: Open in Your Browser
-Navigate to **[http://localhost:3000](http://localhost:3000)** in your browser. The SQLite database (`multichat.db`) will initialize and seed automatically.
+### Step 4: Open in Your Browser
+Open your browser and go to:
+👉 **[http://localhost:3000](http://localhost:3000)**
+
+*(The SQLite database `multichat.db` initializes and seeds default roleplay characters automatically on first launch!)*
 
 ---
 
-## 📖 How to Use
+## 📖 Step-by-Step User Guide
 
-### 1. Creating Characters in the Database
+### 1. Creating or Editing Characters
 1. Click **Character Database** in the left sidebar.
-2. Click **Create New Character**.
-3. **Persona & Appearance Tab**:
-   * Enter **Character Name** and **Role / Title**.
-   * Upload a base portrait image and select an accent ring color.
-   * Provide **Base Physical Appearance** (hair, eyes, build).
-   * Write their **Persona & Bio** (who they are, quirks, how they treat `{{user}}` and others).
-   * Enter **Speaking Style & Action Cadence** (tone and physical gestures using `*asterisks*`).
+2. Click **Create New Character** (or click an existing character card to edit).
+3. **Persona Tab**:
+   * Enter their name and role (e.g., *"Evelyn, Starship Chief Engineer"*).
+   * Upload an avatar portrait and pick a signature border color.
+   * Write their permanent physical traits (hair, eyes, body build).
+   * Describe their personality, quirks, and speaking cadence.
 4. **Wardrobe & Outfits Tab**:
-   * Click **+ Add Outfit** to create alternate costumes (e.g., *Tactical Field Gear*, *Formal Attire*, *Casual Clothes*).
-   * Upload an optional portrait for each costume and enter what they are wearing.
-   * Click **Set as Default** if you want them to start in that costume.
-5. Click **Create Character**.
+   * Click **+ Add Outfit** to give them alternate costumes (e.g., *Uniform*, *Casual*, *Armor*).
+   * Describe what they are wearing and optionally upload a matching portrait for each outfit.
+5. Click **Save Character**.
 
-### 2. Creating a Chatroom
-1. In the left sidebar, click **New Multi-AI Chatroom**.
-2. Enter a **Room Title** and **Shared Scenario Prompt** (e.g., *"Helios-9 Command Bridge Crisis"*).
-3. Search your character library and click on characters to add them to the room cast.
-4. Drag or click arrows to set their initial speaking rotation order.
-5. Click **Create Chatroom**.
+### 2. Creating a Multi-Character Chatroom
+1. Click **New Multi-AI Chatroom** in the left navigation.
+2. Give your story a **Title** (e.g., *"Late Night Shift at the Station"*).
+3. Set the initial **Scenario Prompt** (e.g., *"A thunderstorm has knocked out power to the estate. We are gathered in the library."*).
+4. Select 2 or more characters from your library to join the room.
+5. Arrange their initial turn order and click **Create Chatroom**.
 
-### 3. Running Conversations & Human Interventions
-* **Manual Turn Trigger**: In the right sidebar, click **Trigger [Name] to Speak** to make any character respond on demand. You can also select who they should specifically address.
-* **Auto-Chat**: Click **Start Auto-Chat** in the top bar to let characters take turns automatically.
-* **Cooldown Buffer**: Use the top bar to monitor the turn buffer, **Skip Cooldown** to trigger immediately, or **Pause / Abort** to stop.
-* **Targeting via `@Mentions`**: Type `@` in the chat input or click any character pill to mention them. Only mentioned characters will respond.
-* **Using Quick Responses**: Click **Quick Responses** above the composer to generate 3 reply options. Click any card to edit it in your input box, or click **Send**.
-* **Editing Messages**: Hover over any message bubble and click **Edit** (pencil icon). Subsequent turns will immediately adapt to your edited text.
-* **Regenerating**: Click **Regenerate** on a character message to generate an alternate version (`v1/2`), or click **Rewind Here** to roll back subsequent messages and branch the story.
+### 3. Exploring Places & Time of Day
+1. Look at the top bar above the messages. You will see:
+   * **Place:** (e.g., *Grand Estate*)
+   * **Sub-Place:** (e.g., *Library*, *Kitchen*, *Garden*)
+   * **Time:** (e.g., *Night*, *Sunset*, *Morning*)
+2. Switch to any Sub-Place or Time:
+   * The story scene updates.
+   * If auto-generate backgrounds is enabled, an anime-style visual novel background matching your scene appears automatically!
+   * Click the **Photo/Upload** icon to assign your own custom wallpaper image anytime.
+3. You can also change scenes naturally just by typing:
+   * *"We left the living room and walked out to the balcony under the midnight stars."*
+   * The studio detects the change and switches the environment automatically!
 
-### 4. Mid-Chat Costume Changes
-1. Look at the character cards in the right-hand **Room Cast & Order** sidebar.
-2. If a character has outfits, select an option from their **Outfit** dropdown.
-3. Their avatar updates instantly in the room, and the prompt automatically instructs all characters on their new clothing.
+### 4. Directing the Story
+* **Type a Message**: Talk to everyone, or type `@CharacterName` to address someone specifically.
+* **Trigger a Turn**: In the right sidebar, click **Trigger [Name] to Speak** anytime you want a specific character to chime in.
+* **Auto-Chat**: Click **Start Auto-Chat** in the top bar to let characters converse back and forth on their own.
+* **Quick Responses**: Click the magic wand icon above the text box to view 3 suggested replies written for your persona.
+* **Fixing Mistakes**: Hover over any message and click **Edit** (pencil), **Regenerate**, or **Rewind Here**.
 
-### 5. Configuring Tavern Chat Settings
-Click **Tavern Chat Settings** at the bottom of the left sidebar to access:
-* **Model Tab**: Change LLM providers, model IDs, temperature, and token limits.
-* **System Prompt Tab**: Customize global roleplay guidelines and formatting rules.
-* **Persona Tab**: Edit your user bio, name, and avatar image.
-* **Memory Tab**: View or edit the universal Memory Box, or click **Summarize Room Transcript Now**.
-* **Lorebooks Tab**: Create world lore entries with comma-separated keyword triggers.
-* **Room & Scenario Tab**: Adjust turn strategies, sliding context window sizes, or delete the room.
-
----
-
-## 🏗️ Technical Architecture
-
-### Context Assembly & Wardrobe Injection Pipeline
-```mermaid
-flowchart LR
-    subgraph Inputs["Room & Tavern Settings Context"]
-        SP["System Prompt Directive ({{char}}, {{user}})"]
-        SC["Scenario & Setting Prompt"]
-        MEM["Universal Memory Box / Story Summary"]
-        LB["Active Lorebooks (Keyword-Triggered)"]
-        USER["Active User Persona ({{user}} Profile)"]
-    end
-
-    subgraph Target["Speaking Character Context"]
-        CHAR["Character Persona & Bio"]
-        STYLE["Speaking Style & Cadence"]
-        APP["Base Physical Appearance"]
-        OUTFIT["Active Equipped Outfit / Costume"]
-    end
-
-    subgraph Output["OpenAI API Message Payload"]
-        SYS["system: Persona, Equipped Clothes & Strict Multi-Agent Rules"]
-        HIST["user: Prior transcript remapped to target perspective"]
-        ANCHOR["system: Immediate turn anchor & @mention directive"]
-    end
-
-    SP & SC & MEM & LB & USER --> SYS
-    CHAR & STYLE & APP & OUTFIT --> SYS
-    HIST --> Output
-    ANCHOR --> Output
-```
-
-### Folder & Codebase Structure
-```
-MultiChatStudio/
-├── src/
-│   ├── app/
-│   │   ├── api/
-│   │   │   ├── characters/              # Character CRUD & per-character tuning
-│   │   │   ├── models/                  # Dynamic provider model discovery
-│   │   │   ├── rooms/                   # Chatrooms, transcripts, roster management
-│   │   │   │   └── [roomId]/
-│   │   │   │       ├── messages/        # Message posting & @mention parsing
-│   │   │   │       ├── quick-responses/ # 3x user response generation
-│   │   │   │       ├── stream/          # Real-time SSE streaming & AbortController
-│   │   │   │       └── summarize/       # LLM story archivist & memory summarization
-│   │   │   ├── settings/                # Unified Tavern settings (Prompts, Personas, Lore)
-│   │   │   └── uploads/avatar/          # Local multipart image upload handler
-│   │   ├── globals.css                  # Tailwind styles
-│   │   ├── layout.tsx                   # Root layout & query client provider
-│   │   └── page.tsx                     # Main single-page application mount
-│   ├── components/
-│   │   ├── characters/                  # Character Database & persona library views
-│   │   ├── chat/                        # Workspace, message bubbles, turn composers
-│   │   ├── common/                      # Reusable avatars & status badges
-│   │   ├── controls/                    # Top Orchestrator bar & right Roster sidebar
-│   │   └── modals/                      # Tavern Settings, Room Creator, Character Editor
-│   ├── lib/
-│   │   ├── ai/
-│   │   │   ├── context-assembler.ts     # Multi-agent prompt assembly & outfit injection
-│   │   │   ├── stream-manager.ts        # SSE generator, abort registry & mock fallback
-│   │   │   └── turn-scheduler.ts        # Turn order resolution & @mention router
-│   │   └── db/
-│   │       ├── index.ts                 # Node sqlite WAL instance, queries & migrations
-│   │       └── schema.ts                # Drizzle schema definitions & TypeScript types
-│   └── store/
-│       └── useRoomOrchestrator.ts       # Zustand state machine (turn states, cooldowns)
-├── multichat.db                         # Local SQLite database (git-ignored)
-└── public/uploads/avatars/              # Uploaded portrait image files (git-ignored)
-```
+### 5. Configuring AI Models & Settings
+Click **Tavern Chat Settings** at the bottom of the left sidebar:
+* **Model & Provider**: Choose your provider (Google Gemini, Anthropic Claude, OpenAI, Ollama, OpenRouter, or Local Simulated). Enter your API key and click **Fetch Models**.
+* **Places & Time**: Add new places, create sub-places, customize descriptions, or clear cached backgrounds.
+* **Personas**: Edit how characters see you (your name, avatar, and background story).
+* **Memory & Lore**: Read the memory box or click **Summarize Room** to compress old messages into permanent story memories.
 
 ---
 
-## 🔒 Privacy & Git Safety
+## 🔒 Privacy & Data Safety
 
-The application is pre-configured with a strict `.gitignore` to ensure your personal data, API keys, and custom roleplay content remain completely private:
-* `multichat.db*` (All SQLite database files, WAL logs, and shared memories)
-* `public/uploads/*` (All uploaded character and user avatar pictures)
-* `.env*.local` (All API keys and provider URLs)
+* **100% Localhost**: MultiChat Studio runs locally on your machine.
+* **Your Data Stays Yours**: Your chat history, character descriptions, and pictures are never sent to external tracking servers.
+* **Git-Safe**: All personal data files are excluded by `.gitignore`:
+  * `multichat.db*` (SQLite databases and message histories)
+  * `public/uploads/*` (Character avatars and generated backgrounds)
+  * `.env*.local` (Your personal API keys)
+* **Clean Deletions**: Deleting a chatroom permanently wipes its messages, version branches, and cached background images from disk.
 
 ---
 
 ## 📜 License
 
-MIT License. Feel free to use, modify, and expand for your personal AI roleplay and storytelling adventures!
+MIT License. Built with passion for interactive AI storytelling, tabletop roleplay, and creative writing. Feel free to customize and expand!
